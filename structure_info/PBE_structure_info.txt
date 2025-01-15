@@ -1,0 +1,58 @@
+Directory: 1_c_fm-3m/
+      Lattice Constants:   5.117   5.117   5.117
+         Lattice Angles:  90.000  90.000  90.000
+          International: Fm-3m
+-----------------------------------------
+Directory: 2_t_p42_nmc/
+      Lattice Constants:   5.121   5.121   5.277
+         Lattice Angles:  90.000  90.000  90.000
+          International: P4_2/nmc
+-----------------------------------------
+Directory: 3_m_p21_c/
+      Lattice Constants:   5.188   5.249   5.369
+         Lattice Angles:  90.000  99.622  90.000
+          International: P2_1/c
+-----------------------------------------
+Directory: 4_c-p-43m/
+      Lattice Constants:   5.145   5.145   5.145
+         Lattice Angles:  90.000  90.000  90.000
+          International: P-43m
+-----------------------------------------
+Directory: 5_t-p4_nbm/
+      Lattice Constants:   5.163   5.163   5.121
+         Lattice Angles:  90.000  90.000  90.000
+          International: P4/nbm
+-----------------------------------------
+Directory: 6_m_p21_m/
+      Lattice Constants:   5.488   5.230   5.232
+         Lattice Angles:  84.480 100.478 100.482
+          International: P2_1/m
+-----------------------------------------
+Directory: 7_o_pbcn/
+      Lattice Constants:   4.996   5.798   5.270
+         Lattice Angles:  90.000  90.000  90.000
+          International: Pbcn
+-----------------------------------------
+Directory: 8_t-p4_nbm/
+      Lattice Constants:   5.163   5.163   5.122
+         Lattice Angles:  90.000  90.000  90.000
+          International: P4/nbm
+-----------------------------------------
+Directory: 1_o1_pca21/
+  21 F= -.11484504E+03 E0= -.11484504E+03  d E =-.837530E-04  mag=     0.0000
+      Lattice Constants:   5.323   5.100   5.128
+         Lattice Angles:  90.000  90.000  90.000
+          International: Pca2_1
+-----------------------------------------
+Directory: 2_o2_pmn21/
+  21 F= -.11467846E+03 E0= -.11467846E+03  d E =-.566523E-03  mag=    -0.0000
+      Lattice Constants:   5.152   5.264   5.152
+         Lattice Angles:  90.000  85.697  90.000
+          International: Pmn2_1
+-----------------------------------------
+Directory: 3_r_r3/
+  74 F= -.11457487E+03 E0= -.11457487E+03  d E =-.171401E-04  mag=    -0.0000
+      Lattice Constants:   5.136   5.145   5.153
+         Lattice Angles:  89.974  90.027  90.059
+          International: P2
+-----------------------------------------
