@@ -1,0 +1,70 @@
+ running   96 mpi-ranks, with    1 threads/rank, on    1 nodes
+ distrk:  each k-point on   96 cores,    1 groups
+ distr:  one band on   12 cores,    8 groups
+ vasp.6.4.0 14Feb23 (build Apr 23 2023 23:46:19) complex                        
+  
+ POSCAR found type information on POSCAR HfO 
+ POSCAR found :  2 types and      12 ions
+ -----------------------------------------------------------------------------
+|                                                                             |
+|           W    W    AA    RRRRR   N    N  II  N    N   GGGG   !!!           |
+|           W    W   A  A   R    R  NN   N  II  NN   N  G    G  !!!           |
+|           W    W  A    A  R    R  N N  N  II  N N  N  G       !!!           |
+|           W WW W  AAAAAA  RRRRR   N  N N  II  N  N N  G  GGG   !            |
+|           WW  WW  A    A  R   R   N   NN  II  N   NN  G    G                |
+|           W    W  A    A  R    R  N    N  II  N    N   GGGG   !!!           |
+|                                                                             |
+|     You use a magnetic or noncollinear calculation, but did not specify     |
+|     the initial magnetic moment with the MAGMOM tag. Note that a            |
+|     default of 0 will be used for all atoms. This ferromagnetic setup       |
+|     may break the symmetry of the crystal, in particular it may rule        |
+|     out finding an antiferromagnetic solution. Thence, we recommend         |
+|     setting the initial magnetic moment manually or verifying carefully     |
+|     that this magnetic setup is desired.                                    |
+|                                                                             |
+ -----------------------------------------------------------------------------
+
+ scaLAPACK will be used
+ LDA part: xc-table for Pade appr. of Perdew
+ POSCAR found type information on POSCAR HfO 
+ POSCAR found :  2 types and      12 ions
+ POSCAR, INCAR and KPOINTS ok, starting setup
+ FFT: planning ... GRIDC
+ FFT: planning ... GRID_SOFT
+ FFT: planning ... GRID
+ WAVECAR not read
+ entering main loop
+       N       E                     dE             d eps       ncg     rms          rms(c)
+RMM:   1     0.144681092949E+04    0.14468E+04   -0.48229E+04  5120   0.147E+03
+RMM:   2     0.237738645799E+03   -0.12091E+04   -0.13624E+04  5120   0.397E+02
+RMM:   3    -0.285187448186E+02   -0.26626E+03   -0.33476E+03  5120   0.196E+02
+RMM:   4    -0.123174698507E+03   -0.94656E+02   -0.78762E+02  5120   0.114E+02
+RMM:   5    -0.148773343124E+03   -0.25599E+02   -0.22684E+02  5120   0.597E+01
+RMM:   6    -0.156465959618E+03   -0.76926E+01   -0.73483E+01  5120   0.343E+01
+RMM:   7    -0.159153568916E+03   -0.26876E+01   -0.26607E+01  5120   0.198E+01
+RMM:   8    -0.160159480515E+03   -0.10059E+01   -0.10015E+01  5120   0.117E+01
+RMM:   9    -0.160620774481E+03   -0.46129E+00   -0.46325E+00 10519   0.703E+00
+RMM:  10    -0.160774490162E+03   -0.15372E+00   -0.15828E+00 10685   0.245E+00
+RMM:  11    -0.160791176675E+03   -0.16687E-01   -0.15975E-01 10608   0.119E+00
+RMM:  12    -0.160797189003E+03   -0.60123E-02   -0.61378E-02 10904   0.436E-01    0.284E+01
+RMM:  13    -0.133647957579E+03    0.27149E+02   -0.11256E+02 16640   0.321E+01    0.978E+00
+RMM:  14    -0.132740768080E+03    0.90719E+00   -0.30637E+00 15183   0.629E+00    0.511E+00
+RMM:  15    -0.132468349249E+03    0.27242E+00   -0.86194E-01 12126   0.428E+00    0.892E-01
+RMM:  16    -0.132484845746E+03   -0.16496E-01   -0.11229E-01 11517   0.157E+00    0.351E-01
+RMM:  17    -0.132480434401E+03    0.44113E-02   -0.97786E-03 10417   0.505E-01    0.146E-01
+RMM:  18    -0.132480644204E+03   -0.20980E-03   -0.50168E-03 10392   0.282E-01    0.718E-02
+RMM:  19    -0.132480516380E+03    0.12782E-03   -0.68343E-04 10681   0.136E-01    0.256E-02
+RMM:  20    -0.132480515241E+03    0.11393E-05   -0.14878E-04 11054   0.443E-02    0.146E-02
+RMM:  21    -0.132480510076E+03    0.51648E-05   -0.25450E-05 10828   0.194E-02    0.731E-03
+RMM:  22    -0.132480508937E+03    0.11387E-05   -0.12344E-05 10865   0.121E-02    0.235E-03
+RMM:  23    -0.132480509207E+03   -0.26941E-06   -0.16236E-06 10511   0.532E-03    0.153E-03
+RMM:  24    -0.132480509360E+03   -0.15282E-06   -0.29717E-07  7279   0.251E-03    0.252E-04
+RMM:  25    -0.132480509393E+03   -0.33204E-07   -0.46515E-08  6403   0.992E-04
+   1 F= -.13248051E+03 E0= -.13248051E+03  d E =-.132481E+03  mag=    -0.0000
+ curvature:   0.00 expect dE= 0.000E+00 dE for cont linesearch  0.000E+00
+ trial: gam= 0.00000 g(F)=  0.262E-04 g(S)=  0.187E-04 ort = 0.000E+00 (trialstep = 0.100E+01)
+ search vector abs. value=  0.449E-04
+ reached required accuracy - stopping structural energy minimisation
+开始： 2024-02-23 21:11:20
+结束： 2024-02-23 21:11:57
+耗时： 37s
