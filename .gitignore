@@ -1,3 +1,5 @@
 *.txt
-compute_coercive_field/xyz-000-011
-compute_coercive_field/xyz-000-011/*
+compute_coercive_field/Pca2_1/xyz-000-011
+compute_coercive_field/Pca2_1/xyz-000-011/*
+compute_coercive_field/Pca2_1/*
+compute_coercive_field/Pmn2_1/*
