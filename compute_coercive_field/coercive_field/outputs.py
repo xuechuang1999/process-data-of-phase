@@ -15,6 +15,8 @@ from scipy.interpolate import PchipInterpolator
 
 from .calculation import (
     barrier_at_field,
+    branch_delta_dipoles,
+    branch_delta_polarizations,
     corrected_relative_energies,
     switching_axis,
     target_delta_dipoles,
@@ -71,14 +73,20 @@ LEGEND_KWARGS = {
 
 
 def apply_plot_style() -> None:
+    """Apply one Matplotlib style block shared by all figures."""
+
     rcParams.update(PLOT_STYLE)
 
 
 def display_label(label: str) -> str:
+    """Map internal sample labels to publication-style labels."""
+
     return "HfO2" if label == "undoped-HfO2" else label
 
 
 def sparse_integer_fields(x_min: float, x_max: float, max_markers: int = 8) -> np.ndarray:
+    """Choose a sparse set of integer field values for plot markers."""
+
     first = math.ceil(x_min)
     last = math.floor(x_max)
     if last < first:
@@ -89,6 +97,11 @@ def sparse_integer_fields(x_min: float, x_max: float, max_markers: int = 8) -> n
 
 
 def field_profile_fields(coercive_field: float) -> np.ndarray:
+    """Select fields shown in field_profiles.png.
+
+    The figure shows several integer fields between 0 and Ec, plus Ec itself.
+    """
+
     if not math.isfinite(coercive_field) or coercive_field <= 0:
         return np.array([0.0])
 
@@ -100,6 +113,8 @@ def field_profile_fields(coercive_field: float) -> np.ndarray:
 
 
 def color_ramp(base_color: str, count: int) -> list[tuple[float, float, float]]:
+    """Create progressively lighter colors for a family of field profiles."""
+
     rgb = np.array(to_rgb(base_color), dtype=float)
     if count <= 1:
         return [tuple(rgb)]
@@ -109,6 +124,8 @@ def color_ramp(base_color: str, count: int) -> list[tuple[float, float, float]]:
 
 
 def style_axis(ax: plt.Axes, xlabel: str | None = None, ylabel: str | None = None) -> None:
+    """Apply repeated axis labels and tick styling."""
+
     if xlabel is not None:
         ax.set_xlabel(xlabel, fontsize=14, labelpad=4)
     if ylabel is not None:
@@ -139,6 +156,8 @@ def plot_curve(
     zorder: int = 3,
     clip_on: bool = False,
 ) -> None:
+    """Plot one curve, optionally smoothed with a shape-preserving PCHIP."""
+
     mask = np.isfinite(x) & np.isfinite(y)
     x_clean = x[mask]
     y_clean = y[mask]
@@ -177,6 +196,8 @@ def plot_curve(
 
 
 def vector_columns(prefix: str, vec: np.ndarray) -> dict[str, float]:
+    """Expand a 3-vector into *_x, *_y, *_z CSV columns."""
+
     return {
         f"{prefix}_x": float(vec[0]),
         f"{prefix}_y": float(vec[1]),
@@ -185,6 +206,8 @@ def vector_columns(prefix: str, vec: np.ndarray) -> dict[str, float]:
 
 
 def matrix_columns(prefix: str, mat: np.ndarray) -> dict[str, float]:
+    """Expand a 3x3 matrix into columns named by lattice row and axis."""
+
     rows: dict[str, float] = {}
     for i, row_name in enumerate(["a", "b", "c"]):
         for j, axis in enumerate(["x", "y", "z"]):
@@ -193,6 +216,8 @@ def matrix_columns(prefix: str, mat: np.ndarray) -> dict[str, float]:
 
 
 def write_outputs(results: list[PathResult], output_dir: Path, field_step: float, field_max: float | None) -> None:
+    """Write all CSV tables and figures for the analyzed sample paths."""
+
     output_dir.mkdir(parents=True, exist_ok=True)
     finite_fields = [r.coercive_field_MV_cm for r in results if math.isfinite(r.coercive_field_MV_cm)]
     if field_max is None:
@@ -211,6 +236,8 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
     for result in results:
         first_branch = result.branch_images[0]
         last_branch = result.branch_images[-1]
+        # One compact row per sample: final Ec, limiting constraint, field
+        # direction, branch direction, and endpoint diagnostic values.
         summary_rows.append(
             {
                 "label": result.label,
@@ -218,11 +245,17 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
                 "notes": "; ".join(result.notes),
                 "branch_mode": result.branch_mode,
                 "barrier_mode": result.barrier_mode,
+                "coercive_criterion": result.coercive_criterion,
                 "continuity_threshold_uC_cm2": result.continuity_threshold_uC_cm2,
                 "saddle_image": result.saddle_image,
                 "zero_field_barrier_eV": result.saddle_energy_eV,
                 "coercive_field_MV_cm": result.coercive_field_MV_cm,
                 "limiting_image": result.limiting_image,
+                "limiting_constraint": (
+                    f"{result.limiting_image - 1}->{result.limiting_image}"
+                    if result.coercive_criterion == "downhill" and result.limiting_image is not None
+                    else result.limiting_image
+                ),
                 "endpoint_rel_energy_eV": result.endpoint_rel_energy_eV,
                 "endpoint_projected_dipole_eA": result.endpoint_projected_dipole_eA,
                 **vector_columns("field_dir", result.field_direction),
@@ -235,20 +268,107 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
         )
 
         switch_axis = switching_axis(result)
+        branch_delta_mu_rows = branch_delta_dipoles(result)
+        branch_delta_p_rows = branch_delta_polarizations(result)
         target_delta_mu_rows = target_delta_dipoles(result)
         initial_target_p = target_polarization(result, 0)
         for image_index, (raw, branch) in enumerate(zip(result.raw_images, result.branch_images)):
             target_p = target_polarization(result, image_index)
-            delta_mu = target_delta_mu_rows[image_index]
-            delta_p = target_p - initial_target_p
-            branch_delta_mu = branch.branch_dipole_eA - first_branch.branch_dipole_eA
-            branch_delta_p = branch.branch_polarization_uC_cm2 - first_branch.branch_polarization_uC_cm2
+            # delta_* is the quantity actually used in the external-field
+            # energy correction. It comes from the Berry-branch-corrected
+            # LCALCPOL vector polarization.
+            #
+            # Formulas:
+            #   Delta_P_i = P_branch_i - P_branch_0
+            #   Delta_mu_i = mu_branch_i - mu_branch_0
+            #
+            # CSV meaning:
+            #   delta_P_uC_cm2_* stores Delta_P_i.
+            #   delta_mu_eA_* stores Delta_mu_i.
+            delta_mu = branch_delta_mu_rows[image_index]
+            delta_p = branch_delta_p_rows[image_index]
+
+            # target_delta_* is kept as a diagnostic of the simple prescribed
+            # switching path. It is no longer used for the field correction.
+            #
+            # Formulas:
+            #   Delta_P_target_i = P_target_i - P_target_0
+            #   Delta_mu_target_i = Delta_P_target_i * Omega_i / UC_CM2_PER_EANG_A3
+            target_delta_mu = target_delta_mu_rows[image_index]
+            target_delta_p = target_p - initial_target_p
+
+            # Project vector changes onto the external field unit direction.
+            #
+            # Formulas:
+            #   Delta_mu_parallel_i = Delta_mu_i dot e_hat
+            #   Delta_P_parallel_i = Delta_P_i dot e_hat
+            #   dF_i/dE = -0.01 * Delta_mu_parallel_i
+            #
+            # Symbols:
+            #   e_hat = result.field_direction.
+            #   E is measured in MV/cm, so dF_i/dE has units eV/(MV/cm).
             delta_mu_parallel = float(delta_mu @ result.field_direction)
             delta_p_parallel = float(delta_p @ result.field_direction)
             slope = -EV_PER_EANG_MV_CM * delta_mu_parallel
-            requirement = math.inf
-            if raw.rel_energy_eV > 0 and delta_mu_parallel > 0:
-                requirement = raw.rel_energy_eV / (EV_PER_EANG_MV_CM * delta_mu_parallel)
+            if image_index == 0:
+                constraint_de = math.nan
+                constraint_delta_mu_parallel = math.nan
+                constraint_delta_p_parallel = math.nan
+                constraint_slope = math.nan
+                requirement = math.nan
+                can_be_lowered = False
+                constraint_from = None
+                constraint_to = raw.image
+            elif result.coercive_criterion == "downhill":
+                # Downhill criterion checks each adjacent step i-1 -> i.
+                # The required field is the field that makes this step flat.
+                #
+                # Formulas:
+                #   Delta_E_constraint = U_i - U_{i-1}
+                #   Delta_mu_constraint =
+                #       (Delta_mu_i - Delta_mu_{i-1}) dot e_hat
+                #   required_field =
+                #       Delta_E_constraint / (0.01 * Delta_mu_constraint)
+                prev_raw = result.raw_images[image_index - 1]
+                prev_delta_mu = branch_delta_mu_rows[image_index - 1]
+                prev_delta_p = branch_delta_p_rows[image_index - 1]
+                constraint_de = float(raw.rel_energy_eV - prev_raw.rel_energy_eV)
+                constraint_delta_mu = delta_mu - prev_delta_mu
+                constraint_delta_p = delta_p - prev_delta_p
+                constraint_delta_mu_parallel = float(constraint_delta_mu @ result.field_direction)
+                constraint_delta_p_parallel = float(constraint_delta_p @ result.field_direction)
+                constraint_slope = -EV_PER_EANG_MV_CM * constraint_delta_mu_parallel
+                constraint_from = prev_raw.image
+                constraint_to = raw.image
+                if constraint_de <= 0:
+                    requirement = 0.0
+                elif constraint_delta_mu_parallel > 0:
+                    requirement = constraint_de / (EV_PER_EANG_MV_CM * constraint_delta_mu_parallel)
+                else:
+                    requirement = math.inf
+                can_be_lowered = bool(constraint_delta_mu_parallel > 0)
+            else:
+                # Barrier criterion checks image 00 -> i, i.e. the whole
+                # barrier height relative to the initial state.
+                #
+                # Formulas:
+                #   Delta_E_constraint = U_i - U_0
+                #   Delta_mu_constraint = Delta_mu_i dot e_hat
+                #   required_field =
+                #       Delta_E_constraint / (0.01 * Delta_mu_constraint)
+                constraint_de = float(raw.rel_energy_eV - result.raw_images[0].rel_energy_eV)
+                constraint_delta_mu_parallel = delta_mu_parallel
+                constraint_delta_p_parallel = delta_p_parallel
+                constraint_slope = slope
+                constraint_from = result.raw_images[0].image
+                constraint_to = raw.image
+                if constraint_de <= 0:
+                    requirement = 0.0
+                elif constraint_delta_mu_parallel > 0:
+                    requirement = constraint_de / (EV_PER_EANG_MV_CM * constraint_delta_mu_parallel)
+                else:
+                    requirement = math.inf
+                can_be_lowered = bool(constraint_delta_mu_parallel > 0)
 
             raw_rows.append(
                 {
@@ -306,15 +426,24 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
                     "label": result.label,
                     "image": raw.image,
                     "rel_energy_eV": raw.rel_energy_eV,
+                    "coercive_criterion": result.coercive_criterion,
+                    "constraint_from_image": constraint_from,
+                    "constraint_to_image": constraint_to,
+                    "constraint_delta_energy_eV": constraint_de,
                     "delta_mu_parallel_eA": delta_mu_parallel,
                     "delta_P_parallel_uC_cm2": delta_p_parallel,
                     "field_energy_slope_eV_per_MV_cm": slope,
+                    "constraint_delta_mu_parallel_eA": constraint_delta_mu_parallel,
+                    "constraint_delta_P_parallel_uC_cm2": constraint_delta_p_parallel,
+                    "constraint_field_energy_slope_eV_per_MV_cm": constraint_slope,
                     "required_field_MV_cm": requirement,
-                    "can_be_lowered_by_field": bool(delta_mu_parallel > 0),
+                    "can_be_lowered_by_field": can_be_lowered,
                     **vector_columns("delta_mu_eA", delta_mu),
                     **vector_columns("delta_P_uC_cm2", delta_p),
-                    **vector_columns("branch_delta_mu_eA", branch_delta_mu),
-                    **vector_columns("branch_delta_P_uC_cm2", branch_delta_p),
+                    **vector_columns("branch_delta_mu_eA", delta_mu),
+                    **vector_columns("branch_delta_P_uC_cm2", delta_p),
+                    **vector_columns("target_delta_mu_eA", target_delta_mu),
+                    **vector_columns("target_delta_P_uC_cm2", target_delta_p),
                 }
             )
             polarization_rows.append(
@@ -332,17 +461,30 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
             )
 
         for field in field_grid:
+            # barrier_eV stores the active path criterion value: either the
+            # full barrier B(E) or the largest uphill step D(E).
+            #
+            # Formulas:
+            #   barrier mode:  B(E) = max_i F_i(E) - F_0(E)
+            #   downhill mode: D(E) = max_i [F_i(E) - F_{i-1}(E)]
             barrier_rows.append(
                 {
                     "label": result.label,
                     "field_MV_cm": float(field),
                     "barrier_eV": barrier_at_field(result, float(field)),
+                    "path_value_eV": barrier_at_field(result, float(field)),
+                    "coercive_criterion": result.coercive_criterion,
                 }
             )
         profile_fields = [0.0]
         if math.isfinite(result.coercive_field_MV_cm):
             profile_fields.append(result.coercive_field_MV_cm)
         for field in profile_fields:
+            # corrected_profiles.csv is intentionally small: it stores only
+            # zero field and Ec, which are the profiles most often inspected.
+            #
+            # Formula:
+            #   corrected_rel_energy_eV = F_i(E)
             corrected = corrected_relative_energies(result, field)
             for raw, value in zip(result.raw_images, corrected):
                 profile_rows.append(
@@ -371,6 +513,8 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
 
 
 def plot_barriers(df: pd.DataFrame, results: list[PathResult], output: Path) -> None:
+    """Plot the active path criterion versus external field."""
+
     apply_plot_style()
     fig, ax = plt.subplots(figsize=FIGURE_SIZE)
     for idx, result in enumerate(results):
@@ -411,7 +555,10 @@ def plot_barriers(df: pd.DataFrame, results: list[PathResult], output: Path) -> 
 
     ax.axhline(0.0, color="0.65", linewidth=0.8)
     ax.set_ylim(bottom=0.0)
-    style_axis(ax, "Electric field (MV/cm)", "Switching barrier (eV/cell)")
+    ylabel = "Maximum uphill step (eV/cell)"
+    if results and results[0].coercive_criterion == "barrier":
+        ylabel = "Switching barrier (eV/cell)"
+    style_axis(ax, "Electric field (MV/cm)", ylabel)
     ax.legend(loc="upper right", **LEGEND_KWARGS)
     fig.tight_layout(pad=0.2)
     fig.savefig(output, transparent=False)
@@ -419,6 +566,8 @@ def plot_barriers(df: pd.DataFrame, results: list[PathResult], output: Path) -> 
 
 
 def plot_profiles(results: list[PathResult], output: Path) -> None:
+    """Plot zero-field and Ec-corrected NEB energy profiles."""
+
     apply_plot_style()
     fig, axes = plt.subplots(2, 2, figsize=GRID_FIGURE_SIZE, sharex=True)
     axes_flat = axes.ravel()
@@ -462,6 +611,8 @@ def plot_profiles(results: list[PathResult], output: Path) -> None:
 
 
 def plot_field_profile_families(results: list[PathResult], output: Path) -> None:
+    """Plot families of corrected NEB profiles for multiple fields."""
+
     apply_plot_style()
     fig, axes = plt.subplots(2, 2, figsize=GRID_FIGURE_SIZE, sharex=True)
     axes_flat = axes.ravel()
@@ -499,41 +650,8 @@ def plot_field_profile_families(results: list[PathResult], output: Path) -> None
 
 
 def plot_polarization_profiles(results: list[PathResult], output: Path) -> None:
-    apply_plot_style()
-    fig, axes = plt.subplots(2, 2, figsize=GRID_FIGURE_SIZE, sharex=True)
-    axes_flat = axes.ravel()
-    for panel_index, (ax, result) in enumerate(zip(axes_flat, results)):
-        images = np.array([img.image for img in result.raw_images], dtype=float)
-        axis = switching_axis(result)
-        polarization = np.array(
-            [target_polarization(result, idx) @ axis for idx in range(len(result.raw_images))],
-            dtype=float,
-        )
-        color = SERIES_COLORS[panel_index % len(SERIES_COLORS)]
-        marker = SERIES_MARKERS[panel_index % len(SERIES_MARKERS)]
-        plot_curve(
-            ax,
-            images,
-            polarization,
-            display_label(result.label),
-            color,
-            marker,
-            smooth=False,
-        )
-        ax.axhline(0.0, color="0.75", linewidth=0.8, zorder=0)
-        ax.set_title(display_label(result.label), fontsize=12)
-        ylabel = r"Polarization ($\mu$C/cm$^2$)" if panel_index % 2 == 0 else None
-        style_axis(ax, ylabel=ylabel)
-    for ax in axes_flat[-2:]:
-        ax.set_xlabel("NEB image", fontsize=14, labelpad=4)
-    for ax in axes_flat[len(results) :]:
-        ax.axis("off")
-    fig.tight_layout(pad=0.2)
-    fig.savefig(output, transparent=False)
-    plt.close(fig)
+    """Plot branch-corrected polarization projected along the field."""
 
-
-def plot_branch_polarization_profiles(results: list[PathResult], output: Path) -> None:
     apply_plot_style()
     fig, axes = plt.subplots(2, 2, figsize=GRID_FIGURE_SIZE, sharex=True)
     axes_flat = axes.ravel()
@@ -552,12 +670,45 @@ def plot_branch_polarization_profiles(results: list[PathResult], output: Path) -
             display_label(result.label),
             color,
             marker,
-            smooth=True,
+            smooth=False,
         )
         ax.axhline(0.0, color="0.75", linewidth=0.8, zorder=0)
         ax.set_title(display_label(result.label), fontsize=12)
-        ylabel = r"Branch $P_\parallel$ ($\mu$C/cm$^2$)" if panel_index % 2 == 0 else None
+        ylabel = r"Branch $P\cdot\hat{e}$ ($\mu$C/cm$^2$)" if panel_index % 2 == 0 else None
         style_axis(ax, ylabel=ylabel)
+    for ax in axes_flat[-2:]:
+        ax.set_xlabel("NEB image", fontsize=14, labelpad=4)
+    for ax in axes_flat[len(results) :]:
+        ax.axis("off")
+    fig.tight_layout(pad=0.2)
+    fig.savefig(output, transparent=False)
+    plt.close(fig)
+
+
+def plot_branch_polarization_profiles(results: list[PathResult], output: Path) -> None:
+    """Plot x/y/z components of the LCALCPOL Berry-branch polarization."""
+
+    apply_plot_style()
+    fig, axes = plt.subplots(2, 2, figsize=GRID_FIGURE_SIZE, sharex=True)
+    axes_flat = axes.ravel()
+    for panel_index, (ax, result) in enumerate(zip(axes_flat, results)):
+        images = np.array([img.image for img in result.raw_images], dtype=float)
+        components = np.array([img.branch_polarization_uC_cm2 for img in result.branch_images], dtype=float)
+        for component_index, component_label in enumerate(["Px", "Py", "Pz"]):
+            plot_curve(
+                ax,
+                images,
+                components[:, component_index],
+                component_label,
+                SERIES_COLORS[component_index % len(SERIES_COLORS)],
+                SERIES_MARKERS[component_index % len(SERIES_MARKERS)],
+                smooth=False,
+            )
+        ax.axhline(0.0, color="0.75", linewidth=0.8, zorder=0)
+        ax.set_title(display_label(result.label), fontsize=12)
+        ylabel = r"Branch $P_{x,y,z}$ ($\mu$C/cm$^2$)" if panel_index % 2 == 0 else None
+        style_axis(ax, ylabel=ylabel)
+        ax.legend(loc="best", **LEGEND_KWARGS)
     for ax in axes_flat[-2:]:
         ax.set_xlabel("NEB image", fontsize=14, labelpad=4)
     for ax in axes_flat[len(results) :]:
