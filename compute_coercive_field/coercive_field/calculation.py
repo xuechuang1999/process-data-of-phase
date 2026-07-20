@@ -1,146 +1,170 @@
-"""Coercive-field calculations.
-
-本模块负责把已经读入并完成 Berry branch 修正的 VASP 数据转成外场
-自由能曲线和矫顽场。核心数学链条如下：
-
-1. 零场 NEB 相对能量:
-       U_i = E_i - E_0
-
-2. Berry branch 修正后的偶极矩变化:
-       Delta_mu_i = mu_branch_i - mu_branch_0
-
-3. 将偶极矩变化投影到外场方向:
-       Delta_mu_parallel_i = Delta_mu_i dot e_hat
-
-4. 外场修正后的相对自由能:
-       E_vec = E * e_hat
-       F_i(E_vec) = U_i - 0.01 * (Delta_mu_i dot E_vec)
-
-   其中 E_vec 的单位是 MV/cm，Delta_mu 的单位是 e*Angstrom，
-   0.01 = EV_PER_EANG_MV_CM，用来把二者乘积换算成 eV。
-
-5. 矫顽场 Ec 不是靠扫描网格取近似值，而是对每个约束解析求解。
-   每个约束都写成:
-       Delta_E - 0.01 * E * Delta_mu_parallel <= 0
-
-   若 Delta_E > 0 且 Delta_mu_parallel > 0:
-       E_required = Delta_E / (0.01 * Delta_mu_parallel)
-
-   最终:
-       Ec = max(E_required_i)
-
-   因为所有能垒/上坡约束必须同时被压低到不大于 0，所以取最大值。
-"""
-
 from __future__ import annotations
 
+import itertools
 import math
+import re
 from pathlib import Path
 
 import numpy as np
 
-from .branch import build_branch_images
+from .branch import build_branch_images, continuous_center_zero_branch, direct_branch_to_reference
 from .constants import EV_PER_EANG_MV_CM, UC_CM2_PER_EANG_A3
-from .directions import resolve_direction
-from .models import PathResult
+from .directions import resolve_direction, cartesian_to_lattice
+from .final_polarization_direction import final_polarization_direction
+from .models import PathResult, RawImage
 from .vasp_io import parse_structure, read_raw_images
 
 
-def resolve_final_polarization(text: str, initial_polarization: np.ndarray) -> np.ndarray:
-    """Resolve the final target polarization from CLI input."""
+def parse_optional_vector(text: str) -> np.ndarray | None:
+    text = text.strip()
+    if text.lower() in {"auto", "vasp", "from-vasp"}:
+        return None
+    return np.array([float(part.strip()) for part in text.split(",")], dtype=float)
 
+
+def parse_vector(text: str) -> np.ndarray:
+    return np.array([float(part.strip()) for part in text.split(",")], dtype=float)
+
+
+def phase_and_state_from_path(path: Path) -> tuple[str, str]:
+    phase_names = {"pca21", "pca2_1", "pmn21", "pmn2_1", "fe1", "fe2"}
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part.lower() not in phase_names:
+            continue
+        for candidate in parts[index + 1 :]:
+            if re.search(r"[xyz]{3}-[01]{3}-[01]{3}", candidate):
+                return part, candidate
+        raise ValueError(f"could not find switching state after phase directory in {path}")
+    raise ValueError(f"could not find phase directory in {path}")
+
+
+def initial_lattice_direction_from_phase(phase: str) -> np.ndarray:
+    phase = phase.lower()
+    if phase in {"pca21", "pca2_1", "fe1"}:
+        return np.array([0.0, 0.0, 1.0])
+    if phase in {"pmn21", "pmn2_1", "fe2"}:
+        return np.array([1.0, 0.0, 1.0])
+    raise ValueError(f"unknown phase: {phase}")
+
+
+def estimate_initial_magnitude(raw_images: list[RawImage], center_image: int) -> float:
+    raw_polarizations = [image.raw_polarization_uC_cm2 for image in raw_images]
+    quantum_vectors = [image.quantum_vectors_uC_cm2 for image in raw_images]
+    branch_pols, _ = continuous_center_zero_branch(raw_polarizations, quantum_vectors, center_image)
+    print(f"branch_pols: {branch_pols}")
+    return float(np.linalg.norm(branch_pols[0]))
+
+
+def calculate_initial_polarization(
+    text: str,
+    raw_images: list[RawImage],
+    path: Path,
+    reference_lattice: np.ndarray,
+    center_image: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    # 检测text中是否为"auto", "vasp", "from-vasp"其中之一，如果是则返回None，否则解析为向量
+    explicit = parse_optional_vector(text)
+    if explicit is not None:
+        # 计算向量的模长
+        norm = float(np.linalg.norm(explicit))
+        # 得到单位矢量
+        direction = explicit / norm if norm != 0.0 else np.zeros(3)
+        return explicit, direction
+
+    # phase_and_state_from_path函数返回的是相和末态表示符，phase为"pca21", "pca2_1", "pmn21", "pmn2_1", "fe1", "fe2"其中之一，_ 为xyz-101-000类似的表示符
+    phase, _ = phase_and_state_from_path(path)
+    # 根据相名获取初始极化方向的晶格坐标表示，pca2_1:[0.0, 0.0, 1.0]; pmn2_1:[1.0, 0.0, 1.0]
+    initial_polarization_by_lattice_direction = initial_lattice_direction_from_phase(phase)
+
+    # 将初态结构的极化朝向由晶格坐标转换为笛卡尔坐标，并归一化，得到初始化的方向。
+    initial_polarization_by_cartesian_direction = resolve_direction(
+        ",".join(str(value) for value in initial_polarization_by_lattice_direction),
+        "lattice",
+        reference_lattice,
+    )
+
+    # 另一个计算image0极化值的方法：1. 直接通过将晶格坐标表示的初始极化方向与初态结构的极化量子矢量相乘，
+    # 得到初始极化近似值，然后通过direct_branch_to_reference函数将初始极化近似值调整为最接近的极化值
+    # 因为极化量子是使用的一个3*3矩阵表示的，其是在笛卡尔坐标系下的表示
+    initial_polarization_value_by_cartesian_direction, _ = direct_branch_to_reference(
+        raw_images[0].raw_polarization_uC_cm2,
+        raw_images[0].quantum_vectors_uC_cm2,
+        initial_polarization_by_cartesian_direction @ raw_images[0].quantum_vectors_uC_cm2
+        )
+    print(f"initial_polarization_value_by_cartesian_direction----hhhhhh: {initial_polarization_value_by_cartesian_direction}")
+    print(f"norm: {np.linalg.norm(initial_polarization_value_by_cartesian_direction)}")
+    # # 转换为笛卡尔坐标表示的初始极化值：
+    # initial_polarization_value_by_cartesian_direction = initial_polarization_value_by_lattice_direction @ reference_lattice
+
+
+    # # 计算image0极化值的方法2: codex生成的代码
+    # magnitude = estimate_initial_magnitude(raw_images, center_image)
+    # target = magnitude * initial_polarization_by_cartesian_direction
+    # initial_polarization_value_by_cartesian_direction, _ = direct_branch_to_reference(
+    #     raw_images[0].raw_polarization_uC_cm2,
+    #     raw_images[0].quantum_vectors_uC_cm2,
+    #     target,
+    # )
+    return initial_polarization_value_by_cartesian_direction, initial_polarization_by_cartesian_direction
+
+
+def resolve_final_polarization(text: str, initial_polarization: np.ndarray, path: Path, lattice_A: np.ndarray) -> np.ndarray:
+    if text == "auto":
+        phase, state = phase_and_state_from_path(path)
+        _, rotation = final_polarization_direction(state, phase)
+
+        # rotation为一个3*3的旋转矩阵，为晶轴坐标系下的旋转矩阵。
+        # 将rotation矩阵转换为笛卡尔坐标系下的旋转矩阵
+        # print(f"rotation: {rotation}")
+        rotation = lattice_A.T @ rotation @ np.linalg.inv(lattice_A.T)
+        final_polarization = rotation @ initial_polarization
+        # print(f"rotation: {rotation}")
+        # print(f"initial_polarization: {initial_polarization}")
+        # print(f"path: {path}")
+        # print(f"final_polarization: {final_polarization}")
+        return final_polarization
     if text == "opposite-initial":
         return -initial_polarization
-    return np.array([float(part.strip()) for part in text.split(",")], dtype=float)
+    return parse_vector(text)
 
 
-def infer_endpoint_direction(path: Path) -> np.ndarray | None:
-    """Infer the non-180 endpoint direction from the phase name when possible.
-
-    This direction is used only to resolve the final Berry branch in
-    center-zero mode. It is not a target path for intermediate images.
-    """
-
-    text = str(path)
-    if "Pca2_1" in text:
-        return np.array([0.0, 1.0, 0.0])
-    if "Pmn2_1" in text:
-        direction = np.array([-1.0, 1.0, 0.0])
-        return direction / np.linalg.norm(direction)
-    return None
+def is_non_180_switch(initial_polarization: np.ndarray, final_polarization: np.ndarray) -> bool:
+    initial_norm = float(np.linalg.norm(initial_polarization))
+    final_norm = float(np.linalg.norm(final_polarization))
+    if initial_norm == 0.0 or final_norm == 0.0:
+        return False
+    cosine = float((initial_polarization @ final_polarization) / (initial_norm * final_norm))
+    return not np.isclose(cosine, -1.0, atol=1e-3)
 
 
-# 用来自动计算两个相邻的image之间可以接受的最大差值
-def compute_maxium_difference_between_adjacent_images(quantum_polarization:np.ndarry, n_images:int) -> float:
-    max_quantum_polarization = np.max(quantum_polarization)
-    return max_quantum_polarization / (n_images - 1)
+def automatic_continuity_threshold(raw_images: list[RawImage]) -> float:
+    max_quantum = 0.0
+    for image in raw_images:
+        for coeff in itertools.product((-1, 0, 1), repeat=3):
+            if coeff == (0, 0, 0):
+                continue
+            # 计算沿着不同晶向的极化量子矢量的模长，并取最大值
+            quantum = np.array(coeff, dtype=float) @ image.quantum_vectors_uC_cm2
+            max_quantum = max(max_quantum, float(np.linalg.norm(quantum)))
+    return max_quantum # 2 * max_quantum / len(raw_images)
 
 
-def resolve_endpoint_polarization(text: str) -> np.ndarray | None:
-    """Resolve an explicit endpoint polarization vector from CLI input."""
-    # 检测用户输入的终点极化参数，如果是 "auto" 或 "none"，则返回 None，否则将其解析为一个 numpy 数组，也是一个三维向量，表示终点极化的大小和方向
-    if text in {"auto", "none"}:
-        return None
-    return np.array([float(part.strip()) for part in text.split(",")], dtype=float)
-
-
-def resolve_endpoint_direction(text: str, path: Path) -> np.ndarray | None:
-    """Resolve the endpoint direction used to choose among continuous branches."""
-
-    if text == "none":
-        return None
-    if text == "auto":
-        # 查看路径中是否包含 Pca2_1 或 Pmn2_1 等信息，如果有则返回对应的方向向量，否则返回 None
-        return infer_endpoint_direction(path)
-    direction = np.array([float(part.strip()) for part in text.split(",")], dtype=float)
-    norm = float(np.linalg.norm(direction))
-    if norm == 0:
-        raise ValueError("endpoint direction has zero norm")
-    return direction / norm  #返回归一化之后的用户输入的方向向量，3x1的numpy数组
+def resolve_continuity_threshold(value: str | float, raw_images: list[RawImage]) -> tuple[float, bool]:
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return automatic_continuity_threshold(raw_images), True
+    return float(value), False
 
 
 def target_polarization(result: PathResult, image_index: int) -> np.ndarray:
-    """Return the diagnostic target switching polarization at one image.
-
-    这个函数只生成“用户设想的线性极化路径”，用于画图和诊断，不参与
-    外场能量修正。真正进入 F_i(E) 的是 LCALCPOL 数据经 Berry branch
-    修正后的 branch_dipole。
-
-    Formula:
-        t_i = i / (N - 1)
-        P_target_i = P_initial + t_i * (P_final - P_initial)
-
-    Meaning of symbols:
-        i: image_index, NEB image number.
-        N: len(result.raw_images), total number of NEB images.
-        P_initial: result.target_initial_polarization_uC_cm2, target initial
-            polarization in uC/cm^2.
-        P_final: result.target_final_polarization_uC_cm2, target final
-            polarization in uC/cm^2.
-        P_target_i: returned vector, target polarization at image i.
-    """
-
     image_count = len(result.raw_images)
-    # 反应坐标的线性进度 t_i。只有一个 image 时退化为 t_i = 0。
     progress = image_index / (image_count - 1) if image_count > 1 else 0.0
-    # 线性插值得到诊断目标极化 P_target_i。
     return result.target_initial_polarization_uC_cm2 + progress * (
         result.target_final_polarization_uC_cm2 - result.target_initial_polarization_uC_cm2
     )
 
 
 def switching_axis(result: PathResult) -> np.ndarray:
-    """Return the axis used for plotting the target switching profile.
-
-    Formula:
-        e_switch = P_initial / |P_initial|
-
-    Meaning of symbols:
-        P_initial: result.target_initial_polarization_uC_cm2.
-        e_switch: returned unit vector. If P_initial is zero, the code falls
-            back to result.branch_direction.
-    """
-
     axis = result.target_initial_polarization_uC_cm2
     norm = float(np.linalg.norm(axis))
     if norm == 0.0:
@@ -149,194 +173,43 @@ def switching_axis(result: PathResult) -> np.ndarray:
 
 
 def target_delta_dipoles(result: PathResult) -> np.ndarray:
-    """Convert diagnostic target polarization changes to target dipole changes.
-
-    这里处理的是 target path 的诊断量，不用于 Ec。
-
-    极化和偶极矩换算关系:
-        P = UC_CM2_PER_EANG_A3 * mu / Omega
-
-    因此:
-        Delta_mu = Delta_P * Omega / UC_CM2_PER_EANG_A3
-
-    这里使用每个 image 自己的 Omega_i，因为 NEB images 的弛豫晶胞体积
-    可能略有不同。
-
-    Formula:
-        Delta_P_i = P_target_i - P_target_0
-        Delta_mu_i = Delta_P_i * Omega_i / UC_CM2_PER_EANG_A3
-
-    Meaning of symbols:
-        Delta_P_i: target polarization change at image i, in uC/cm^2.
-        P_target_i: target_polarization(result, i).
-        Omega_i: raw.volume_A3, cell volume of image i in Angstrom^3.
-        UC_CM2_PER_EANG_A3: conversion factor from
-            e*Angstrom/Angstrom^3 to uC/cm^2.
-        Delta_mu_i: returned target dipole change, in e*Angstrom.
-    """
-
     initial_target = target_polarization(result, 0)
     rows = []
     for image_index, raw in enumerate(result.raw_images):
-        # Delta_P_target_i = P_target_i - P_target_0。
         delta_p = target_polarization(result, image_index) - initial_target
-        # Delta_mu_target_i = Delta_P_target_i * Omega_i / C_P。
         rows.append(delta_p * raw.volume_A3 / UC_CM2_PER_EANG_A3)
     return np.array(rows, dtype=float)
 
 
 def branch_delta_dipoles(result: PathResult) -> np.ndarray:
-    """Return Berry-branch-corrected dipole changes relative to image 00.
-
-    这是外场能量修正真正使用的偶极矩变化。
-
-    Formula:
-        Delta_mu_i = mu_branch_i - mu_branch_0
-
-    Meaning of symbols:
-        mu_branch_i: result.branch_images[i].branch_dipole_eA, the dipole
-            corresponding to the Berry-branch-corrected vector polarization.
-        Delta_mu_i: returned vector, used directly for electric-field energy
-            correction.
-    """
-
-    # 以 image 00 作为参考态，所有外场修正都只使用相对偶极矩变化。
     first = result.branch_images[0].branch_dipole_eA
     return np.array([image.branch_dipole_eA - first for image in result.branch_images], dtype=float)
 
 
 def branch_delta_polarizations(result: PathResult) -> np.ndarray:
-    """Return Berry-branch-corrected polarization changes relative to image 00.
-
-    这个量主要写入 CSV 供检查；能量修正等价地使用 branch_delta_dipoles。
-
-    Formula:
-        Delta_P_i = P_branch_i - P_branch_0
-
-    Meaning of symbols:
-        P_branch_i: result.branch_images[i].branch_polarization_uC_cm2.
-        Delta_P_i: branch-corrected vector polarization change in uC/cm^2.
-    """
-
-    # Delta_P_i = P_branch_i - P_branch_0。
     first = result.branch_images[0].branch_polarization_uC_cm2
     return np.array([image.branch_polarization_uC_cm2 - first for image in result.branch_images], dtype=float)
 
 
 def corrected_relative_energies(result: PathResult, field_MV_cm: float) -> np.ndarray:
-    """Apply the external-field correction to all relative NEB energies.
-
-    本函数是外场能量修正的核心。
-
-    代码采用显式矢量点乘写法:
-        E_vec = E * e_hat
-        F_i(E_vec) = U_i - 0.01 * (Delta_mu_i dot E_vec)
-
-    单位:
-        E_vec: MV/cm
-        Delta_mu_i: e*Angstrom
-        Delta_mu_i dot E_vec: e*Angstrom*MV/cm
-        0.01 * (Delta_mu_i dot E_vec): eV
-        F_i(E): eV
-
-    这里的 U_i 已经是相对 image 00 的零场能量，所以 F_i(E) 也是相对
-    image 00 的外场修正能量。image 00 的 Delta_mu_0 = 0，因此 F_0(E)=U_0。
-
-    Equivalent vector form:
-        F_i(E_vec) = U_i - Omega_i * Delta_P_i dot E_vec
-        E_vec = E * e_hat
-
-    Code formula:
-        E_vec = field_MV_cm * e_hat
-        field_work_i = Delta_mu_i dot E_vec
-        F_i(E_vec) = U_i - EV_PER_EANG_MV_CM * field_work_i
-
-    Meaning of symbols:
-        U_i: img.rel_energy_eV, zero-field relative NEB energy in eV.
-        E: field_MV_cm, external-field magnitude in MV/cm.
-        e_hat: result.field_direction, Cartesian unit field direction.
-        E_vec: Cartesian electric-field vector in MV/cm.
-        Delta_mu_i: branch_delta_dipoles(result)[i], Berry-branch-corrected
-            dipole change relative to image 00 in e*Angstrom.
-        field_work_i: vector dot product Delta_mu_i dot E_vec.
-        EV_PER_EANG_MV_CM: 0.01 eV per (e*Angstrom*MV/cm).
-        F_i(E): returned corrected relative free energy in eV.
-    """
-
-    # U_i: zero-field relative NEB energies.
     rel = np.array([img.rel_energy_eV for img in result.raw_images])
-    # E_vec = E * e_hat. Internally e_hat is Cartesian, after resolving the
-    # user's crystallographic direction with the first image lattice.
     field_vector = field_MV_cm * result.field_direction
-    # field_work_i = Delta_mu_i dot E_vec. This is the vector dot product in
-    # e*Angstrom*MV/cm that enters -Delta_mu dot E.
     field_work = branch_delta_dipoles(result) @ field_vector
-    # F_i(E_vec) = U_i - C_E * (Delta_mu_i dot E_vec).
     return rel - EV_PER_EANG_MV_CM * field_work
 
 
 def barrier_indices(result: PathResult) -> range:
-    """Return image indices included in the selected path criterion.
-
-    这个函数只决定“哪些 image 或 step 参与判据”。它不计算能量。
-
-    Meaning of modes:
-        to-saddle: i = 1..saddle_image.
-        intermediate: i = 1..N-2, excluding both endpoints.
-        full-path: i = 1..N-1, excluding only image 00.
-    """
-
-    if result.barrier_mode == "to-saddle":
-        return range(1, result.saddle_image + 1)
-    if result.barrier_mode == "intermediate":
-        return range(1, len(result.raw_images) - 1)
-    if result.barrier_mode == "full-path":
-        return range(1, len(result.raw_images))
-    raise ValueError(f"unknown barrier mode: {result.barrier_mode}")
+    return candidate_indices_for_mode(result.barrier_mode, len(result.raw_images), result.saddle_image)
 
 
 def path_value_at_field(result: PathResult, field_MV_cm: float) -> float:
-    """Evaluate the active path criterion at one external field.
-
-    这是给 barrier_vs_field.csv/png 使用的“路径判据函数”。它把一个电场
-    E 映射成一个标量 path value。
-
-    barrier 判据:
-        B(E) = max_i F_i(E) - F_0(E)
-
-    downhill 判据:
-        D(E) = max_i [F_i(E) - F_{i-1}(E)]
-
-    Ec 的定义是这个 path value 第一次降到 0 的电场。注意真正求 Ec
-    用的是 coercive_requirements() 的解析式；本函数主要用于扫描和画图。
-
-    Formulas:
-        Barrier criterion:
-            B(E) = max_i F_i(E) - F_0(E)
-
-        Downhill criterion:
-            D(E) = max_i [F_i(E) - F_{i-1}(E)]
-
-    Meaning of symbols:
-        i: image index included by barrier_indices(result).
-        F_i(E): corrected_relative_energies(result, E)[i].
-        B(E): whole-path barrier height in eV.
-        D(E): largest adjacent uphill step in eV.
-        Returned value: B(E) if criterion is "barrier", otherwise D(E).
-    """
-
     corrected = corrected_relative_energies(result, field_MV_cm)
+    indices = list(barrier_indices(result))
+    if not indices:
+        return 0.0
     if result.coercive_criterion == "barrier":
-        indices = list(barrier_indices(result))
-        if not indices:
-            return 0.0
-        # B(E) = max selected F_i(E) - F_0(E)。
         return float(np.max(corrected[indices]) - corrected[0])
     if result.coercive_criterion == "downhill":
-        indices = list(barrier_indices(result))
-        if not indices:
-            return 0.0
-        # D(E) = max selected adjacent uphill step。
         steps = [corrected[image] - corrected[image - 1] for image in indices]
         return float(np.max(steps))
     raise ValueError(f"unknown coercive criterion: {result.coercive_criterion}")
@@ -352,101 +225,42 @@ def coercive_requirements(
     candidate_indices: range,
     criterion: str,
 ) -> tuple[list[tuple[float, int]], list[int]]:
-    """Compute the field required by each candidate constraint.
-
-    这个函数把“求 Ec”转成一组线性不等式求解。
-
-    每个约束的一般形式:
-        Delta_E - 0.01 * E * Delta_mu_parallel <= 0
-
-    其中 Delta_E 是零场下该约束两端的能量差，Delta_mu_parallel 是同一
-    约束两端的投影偶极矩差。因为 F_i(E) 对 E 是线性的，所以每个约束
-    都可以解析求出刚好变平的电场。
-
-    若 Delta_E <= 0:
-        该约束在零场下已经不是上坡，不限制 Ec。
-
-    若 Delta_E > 0 且 Delta_mu_parallel > 0:
-        外场能降低该上坡约束，所需电场为
-        E_required = Delta_E / (0.01 * Delta_mu_parallel)
-
-    若 Delta_E > 0 且 Delta_mu_parallel <= 0:
-        当前外场方向不会降低该约束；电场越大也无法把它压到 0，
-        因此记录到 impossible。
-
-    Formulas:
-        Barrier criterion for image i:
-            Delta_E_i = U_i - U_0
-            Delta_mu_parallel_i =
-                (Delta_mu_i - Delta_mu_0) dot e_hat
-            E_required_i =
-                Delta_E_i / (0.01 * Delta_mu_parallel_i)
-
-        Downhill criterion for step i-1 -> i:
-            Delta_E_i = U_i - U_{i-1}
-            Delta_mu_parallel_i =
-                (Delta_mu_i - Delta_mu_{i-1}) dot e_hat
-            E_required_i =
-                Delta_E_i / (0.01 * Delta_mu_parallel_i)
-
-    Meaning of code variables:
-        rel_energies: array of U_i values in eV.
-        projected_delta: array of Delta_mu_i dot e_hat in e*Angstrom.
-        de: Delta_E_i, zero-field energy difference for the constraint.
-        dm: Delta_mu_parallel_i, projected dipole difference for the constraint.
-        requirements: finite E_required_i values in MV/cm.
-        impossible: constraints with de > 0 and dm <= 0.
-    """
-
     requirements: list[tuple[float, int]] = []
     impossible: list[int] = []
+
     if criterion == "barrier":
         for image in candidate_indices:
-            # Barrier constraint compares image 00 -> image i:
-            #   Delta_E = U_i - U_0
-            #   Delta_mu_parallel = Delta_mu_i_parallel - Delta_mu_0_parallel
-            # Since Delta_mu_0_parallel = 0, the subtraction is kept for clarity.
-            de = float(rel_energies[image] - rel_energies[0])
-            dm = float(projected_delta[image] - projected_delta[0])
-            if de <= 0:
-                # Already downhill/flat at zero field; it does not constrain Ec.
+            # 相对能量差值
+            # 偶极矩差值
+            delta_energy = float(rel_energies[image] - rel_energies[0])
+            delta_dipole = float(projected_delta[image] - projected_delta[0])
+            if delta_energy <= 0:
                 continue
-            if dm <= 0:
-                # Positive uphill barrier but the selected field direction cannot lower it.
-                impossible.append(image)
+            if delta_dipole >= delta_energy:
+                requirements.append((delta_energy / (delta_dipole), image))
             else:
-                # E_required = Delta_E / (0.01 * Delta_mu_parallel).
-                requirements.append((de / (EV_PER_EANG_MV_CM * dm), image))
-    elif criterion == "downhill":
+                continue
+        return requirements, impossible
+
+    if criterion == "downhill":
         for image in candidate_indices:
-            # Downhill constraint compares adjacent step image-1 -> image:
-            #   Delta_E = U_i - U_{i-1}
-            #   Delta_mu_parallel =
-            #       Delta_mu_i_parallel - Delta_mu_{i-1}_parallel
-            de = float(rel_energies[image] - rel_energies[image - 1])
-            dm = float(projected_delta[image] - projected_delta[image - 1])
-            if de <= 0:
-                # This step is already not uphill at zero field.
+            delta_energy = float(rel_energies[image] - rel_energies[image - 1])
+            delta_dipole = float(projected_delta[image] - projected_delta[image - 1])
+            if delta_energy <= 0:
                 continue
-            if dm <= 0:
-                # The selected field direction cannot reduce this uphill step.
-                impossible.append(image)
-            else:
-                # Field required to make this adjacent step exactly flat.
-                requirements.append((de / (EV_PER_EANG_MV_CM * dm), image))
-    else:
-        raise ValueError(f"unknown coercive criterion: {criterion}")
-    return requirements, impossible
+            # if delta_dipole >= delta_energy:
+            #     requirements.append((delta_energy / (delta_dipole), image))
+            # else:
+            #     continue
+
+            requirements.append((delta_energy / (EV_PER_EANG_MV_CM * delta_dipole), image))
+            print(f"image: {image}, delta_energy: {delta_energy}, delta_dipole: {delta_dipole}, requirement: {delta_energy / (EV_PER_EANG_MV_CM * delta_dipole)}")
+        return requirements, impossible
+
+    raise ValueError(f"unknown coercive criterion: {criterion}")
 
 
 def candidate_indices_for_mode(mode: str, image_count: int, saddle_image: int) -> range:
-    """Map barrier-mode names to the image range checked by the criterion.
-
-    这个函数必须和 barrier_indices() 保持一致。区别只是：
-    barrier_indices() 用于扫描/画图；candidate_indices_for_mode() 用于
-    解析求 Ec。
-    """
-
     if mode == "to-saddle":
         return range(1, saddle_image + 1)
     if mode == "intermediate":
@@ -457,16 +271,12 @@ def candidate_indices_for_mode(mode: str, image_count: int, saddle_image: int) -
 
 
 def limiting_label(criterion: str, image: int) -> str:
-    """Human-readable label for the limiting constraint."""
-
     if criterion == "downhill":
         return f"{image - 1}->{image}"
     return str(image)
 
 
 def limiting_image_value(criterion: str, image: int) -> int:
-    if criterion == "downhill":
-        return image
     return image
 
 
@@ -477,23 +287,7 @@ def coercive_field_from_requirements(
     mode: str,
     notes: list[str],
 ) -> tuple[float, int | None]:
-    """Collapse per-constraint requirements into the final coercive field.
-
-    coercive_requirements() 给出每个约束单独需要的电场。最终 Ec 必须让
-    所有约束同时满足，所以取最大值。
-
-    Formula:
-        E_c = max_i E_required_i
-
-    Meaning of symbols:
-        E_required_i: field needed to flatten one barrier/downhill constraint.
-        E_c: returned coercive field. The max is used because all constraints
-            must be lowered at the same time.
-        limiting image/step: image giving the maximum E_required_i.
-    """
-
     if impossible:
-        # 有任何无法被当前外场方向降低的正上坡约束，就不存在有限 Ec。
         notes.append(
             "no finite field for "
             + criterion
@@ -503,11 +297,21 @@ def coercive_field_from_requirements(
         )
         return math.inf, None
     if requirements:
-        # 限制约束是 required field 最大的那一个。
         field, image = max(requirements, key=lambda item: item[0])
         return float(field), limiting_image_value(criterion, image)
-    # 没有正上坡约束时，零场下路径已经满足所选判据，Ec = 0。
     return 0.0, None
+
+
+# 计算F_i(E)=U_ks - \Omega \vec{P} \cdot \vec{E}，其中U_ks为vasp计算得到的能量，\Omega为体积，\vec{P}为极化矢量，\vec{E}为外加电场
+# omega_i: 晶胞体积，单位为A^3
+# P_i: 极化矢量，单位为uC/cm^2
+# E_field_direction: 外加电场方向，单位为MV/cm
+# E_field_magnitude: 外加电场强度，单位为MV/cm
+# 返回值为F_i(E)，单位为eV
+def omega_P_dot_E_energy(omega_i: float, P_i: np.ndarray, E_field_direction: np.ndarray, E_field_magnitude: float) -> float:
+    print(f"omega_i: {omega_i}, P_i: {P_i}, E_field_direction: {E_field_direction}, E_field_magnitude: {E_field_magnitude}")
+    omega_P_dot_E = omega_i * np.dot(P_i, E_field_direction * E_field_magnitude) / UC_CM2_PER_EANG_A3
+    return omega_P_dot_E
 
 
 def analyze_path(
@@ -516,160 +320,211 @@ def analyze_path(
     energy_source: str,
     field_direction_arg: str,
     field_coordinates: str,
-    branch_direction_arg: str,
-    branch_coordinates: str,
-    branch_mode: str,
     barrier_mode: str,
     coercive_criterion: str,
-    initial_polarization: np.ndarray,
+    initial_polarization: str,
     final_polarization_arg: str,
-    endpoint_direction_arg: str,
-    endpoint_polarization_arg: str,
-    continuity_threshold_uC_cm2: float,
-    branch_search_radius: int,
+    continuity_threshold_uC_cm2: str | float,
 ) -> PathResult:
-    """Analyze one sample path from raw VASP data through final Ec.
-
-    这是单个 sample 的总控函数。它把输入文件中的 VASP 原始量转换成
-    PathResult，后续 outputs.py 只负责把 PathResult 写出。
-
-    High-level calculation flow:
-        1. 读取并存储vasp原始数据
-        2. 确定连续的branch
-               P_branch_i = P_raw_i + n_i1*Q_a_i + n_i2*Q_b_i + n_i3*Q_c_i
-           在center-zero模式下，计算流程为：
-            首先将所有的原始极化值平移到同一条branch上，保证其连续性:
-               Q_i^T c_i = P_branch_{i-1} - P_raw_i
-               n_i = floor(c_i + 0.5)
-               P_branch_i = P_raw_i + n_i @ Q_i
-           在移动之后，将最中心的branch作为参考值，进行整体平移，计算每个image的branch修正后的极化值和偶极矩。
-           对于非180度的终点极化路径，指定终点极化方向之后，将最中心的image到终点的四个image进行平移，使得最终极化方向沿着重点方向。
-        3. 对于电场矫正，使用 
-            Delta_mu_i = mu_branch_i - mu_branch_0
-            其中 mu_branch_i 是经过 Berry branch 修正后的偶极矩，mu_branch_0 是第一个image的偶极矩。
-
-        4. 对于电场下的矫正能量：
-            E_vec = E * e_hat
-            F_i(E_vec) = U_i - 0.01 * (Delta_mu_i dot E_vec)
-            对于解析矫顽场Ec， 将 Delta_mu_i 投影到 e_hat 上，得到标量场强度 E 的未知系数。
-
-
-    Main symbols:
-        U_i: 零电场下image i的相对能量，单位 eV。
-        Omega_i: image i的晶胞体积，单位 A^3。
-        P_branch_i: 经过 Berry branch 修正后的image i的极化值。
-        Delta_mu_i: 经过校正后的偶极矩变化（相对于 image 00），单位 e*Angstrom。
-        e_hat: 外电场单位方向。
-        E_c: 矫顽场 in MV/cm.
-    """
-
-    # 读取vasp计算出的原始数据，晶格参数，相对能量，晶胞体积，极化量子值。返回的raw_images是一个列表，每个元素都是一个RawImage对象。label用于指定名称，如“HfO2”，“a-HZO”、“b-HZO”、“c-HZO”; path用于指定每一个label对应的路径；energy用于指定能量从哪一个文件中读取。
+    #=============================================================
+    # 1. 从vasp的计算文件中提取原始数据。
+    #    得到raw_images: list[RawImage]
+    #=============================================================
     raw_images, notes = read_raw_images(label, path, energy_source)
-    # 读取第一个图像的晶格参数--3x3的numpy数组，作为参考晶格，parse_structure函数返回的第二个值是晶胞体积，这里不需要，所以用 _ 忽略掉
-    reference_lattice, _ = parse_structure(raw_images[0].structure_path)
+    reference_lattice = np.array(raw_images[0].lattice_A)
+    print(f"reference_lattice: {reference_lattice}")
+    # print(f"raw_image[-1].image: {raw_images[-1].image}")
 
-    # 指定电场方向，默认是 [0, 0, -1]，
-    # 这里的reverse-initial表示取初始极化方向的反方向来作为电场方向，
-    # 但是在定义该参数的时候并没有说可以选择reverse-initial，所以需要后续修改！！
-    if field_direction_arg == "reverse-initial":
-        raw_field_direction = -initial_polarization
-        # 将初始极化方向取反，得到外场方向，并归一化为单位向量， np.linalg.norm(raw_field_direction) 计算向量的欧几里得范数，即向量的长度。该等式为了得到单位向量。
-        field_direction = raw_field_direction / np.linalg.norm(raw_field_direction)
-    else:
-        # 这里用的是第一个image的晶格参数作为参考晶格。field_direction_arg默认是0, 0, -1；field_coordinates默认是lattice，这里是为了考虑当
-        field_direction = resolve_direction(field_direction_arg, field_coordinates, reference_lattice)
+    center_image = len(raw_images) // 2
 
-    # branch_direction的默认值为0,0,-1;
-    # branch_coodinates默认是"lattice"，模式。
-    if branch_direction_arg == "field":
-        branch_direction = field_direction
-    elif branch_direction_arg == "reverse-initial":
-        raw_branch_direction = -initial_polarization
-        branch_direction = raw_branch_direction / np.linalg.norm(raw_branch_direction)
-    else:
-        branch_direction = resolve_direction(branch_direction_arg, branch_coordinates, reference_lattice) # 这里使用branch的坐标参数依然使用第一个image的晶格参数作为参考晶格，仍有待商榷，个人认为是有问题的。
-
-    # 将相对能赋值到一个列表中，并提取出能量值最高的image的索引值
-    rel_energies = np.array([img.rel_energy_eV for img in raw_images])
-    saddle_image = int(np.argmax(rel_energies))
-
-    # final_polarization_arg为用户输入的最终极化方向-----需要想办法让它根据最后一个image自动推断出来，而不是用户输入。需要确定是最终极化方向还是最终极化值！目前写的final_polarization_arg的默认值为opposite-initial.   应该是最终极化值！！ 下面的endpoint_direction为最终极化方向。
-    # initial_polarization为用户输入的初始极化方向-----可以由用户指定或者根据一个字典来自动判断，如Pca2_1: 001, Pmn2_1:101。同样需要确定是初始极化方向还是初始极化值！目前默认值为np.array([0.0, 0.0, 50.0])--为一个numpy数组   应该是最终极化值
-    # resolve_final_polarization用于将用户输入的--final-polarization参数解析为一个numpy数组。这里之所以要传入initial_polarization，是因为对于final_polarization_arg为“opposite-initial”时，会返回-initial_polarization
-    final_polarization = resolve_final_polarization(final_polarization_arg, initial_polarization)
-
-    # ednpoint_direction_arg为用户输入的--endpoint-direction参数，默认值为auto。用于推断终点的极化方向。如果字段中含有Pca2_1，则。。。如果字段中含有Pmn2_1则。。。返回的是一个单位矢量
-    endpoint_direction = resolve_endpoint_direction(endpoint_direction_arg, path)
-
-    # 将用户输入的--endpoint-polarization参数解析为一个numpy数组，如果是auto或none，则返回None，否则返回一个三维向量
-    endpoint_polarization = resolve_endpoint_polarization(endpoint_polarization_arg)
-    if endpoint_direction_arg == "auto" and endpoint_direction is not None:
+    #==============================================================
+    # 2. 计算铁电极化连续时，相邻两个image的极化差值阈值
+    # 默认的continuity_threshold为auto，continuity_threshold得到的为自动计算的阈值，而used_auto_threshold得到的为True
+    #==============================================================
+    continuity_threshold, used_auto_threshold = resolve_continuity_threshold(
+        continuity_threshold_uC_cm2,
+        raw_images,
+    )
+    # 如果是使用的自动计算的阈值，则打印输出计算的结果
+    if used_auto_threshold:
         notes.append(
-            "auto endpoint branch direction "
-            + ",".join(f"{value:.6g}" for value in endpoint_direction)
-            + " used only to resolve final Berry branch"
+            f"auto branch continuity threshold {continuity_threshold:.6g} uC/cm^2 "
+            "from 2* max(|integer-combined polarization quantum|)/(image_count)"
         )
 
-    # 为了后续计算矫顽场，进行build_branch_images()
-    # 进行场修正之后的：
-    #   P_branch_i = P_raw_i + n_i1*Q_a_i + n_i2*Q_b_i + n_i3*Q_c_i
-    #
-    # 默认的 center-zero 模式下，算法从 image 00 开始向最后一个 image 走。对于每个 image，它在极化量子基底中求解分支系数：
-    #   Q_i^T c_i = P_branch_{i-1} - P_raw_i
-    #   n_i = floor(c_i + 0.5)
-    #   P_branch_i = P_raw_i + n_i @ Q_i
-    # 创建一个连续的branch之后，通过将最中心的image的polarization尽可能接近于0，来实现全局的整数偏移。对于非180度的终点，终点方向/值可以用来解决最终分支的等效性。如何自动识别终点方向的值。
-    branch_images = build_branch_images(
-        raw_images=raw_images,
-        branch_mode=branch_mode,
-        branch_direction=branch_direction,
-        center_image=len(raw_images) // 2,
-        continuity_threshold_uC_cm2=continuity_threshold_uC_cm2,
-        search_radius=branch_search_radius,
-        initial_polarization=initial_polarization,
-        final_polarization=final_polarization,
-        endpoint_direction=endpoint_direction,
-        endpoint_polarization=endpoint_polarization,
+    #==============================================================
+    # 3. 推断初始极化
+    # 首先calculate_initial_polarization函数中
+    # 3.1. 检测initial_polarization是否为"auto", "vasp", "from-vasp"其中之一，如果是则返回None，否则解析为向量
+    # 3.2. 如果返回了向量，则计算其模长和单位矢量，并返回
+    # 3.3. 如果initial_polarization为"auto", "vasp", "from-vasp"其中之一，则解析path，检测path中是否包含相名（pca2_1, fe1）和末态标识符(xyz-001-000)
+    # 3.4. 如果path中包含了相名，则会直接根据设定的相的初始极化方向，给出来初始极化方向，并根据传进去的reference_lattice将极化方向转换为笛卡尔坐标系下的单位矢量，至此，解决了初始极化方向的问题
+    # 3.5. estimate_initial_magnitude()调用continuous_center_zero_branch()函数
+    # initial_p 和initial_direction均使用的笛卡尔坐标系表示
+    #==============================================================
+    initial_p, initial_direction = calculate_initial_polarization(
+        initial_polarization,
+        raw_images,
+        path,
+        reference_lattice,
+        center_image,
+    )
+    notes.append(
+        "initial polarization "
+        + ",".join(f"{value:.6g}" for value in initial_p)
+        + " uC/cm^2 from direction "
+        + ",".join(f"{value:.6g}" for value in initial_direction)
     )
 
-    # Project branch-corrected dipole changes onto the external-field direction
-    # only to get the linear coefficient used in the analytic Ec solve.
-    # Math:
-    #   Delta_mu_i = mu_branch_i - mu_branch_0
-    #   projected_delta_i = Delta_mu_i dot e_hat
-    #
-    # The full corrected energy uses the vector dot product:
-    #   F_i(E_vec) = U_i - 0.01 * (Delta_mu_i dot E_vec)
-    # with E_vec = E * e_hat. Therefore projected_delta_i is just the
-    # coefficient multiplying the unknown scalar field magnitude E.
+
+    #==============================================================
+    # 4. 计算末态极化值
+    # final_polarization_arg为用户输入的--final-polarization对应的参数，可以为auto
+    # final_polarization_arg为auto时，根据path中的相名和末态标识符，推断出最终极化方向，
+    # 并将其转换为笛卡尔坐标系下的单位矢量
+    #==============================================================
+    final_p = resolve_final_polarization(final_polarization_arg, initial_p, path, raw_images[0].lattice_A)
+
+    # # is_non_180_switch函数用于测试初始计划和最终极化方向是否为180度，如果为180度，则返回false
+    # # 否则，返回true，表示为非180度的极化翻转，此时，endpoint_reference为最终极化方向final_p，否则为None
+    # endpoint_reference = final_p if is_non_180_switch(initial_p, final_p) else None
+
+    # endpoint_reference为最终极化方向final_p，直接替换上面的 `endpoint_reference = final_p if is_non_180_switch(initial_p, final_p) else None`
+    endpoint_reference = final_p
+    print(f"endpoint_reference: {endpoint_reference}")
+    if endpoint_reference is not None:
+        endpoint_reference, _ = direct_branch_to_reference(
+            raw_images[-1].raw_polarization_uC_cm2,
+            raw_images[-1].quantum_vectors_uC_cm2,
+            endpoint_reference,
+            )
+        notes.append(
+            "non-180 switch detected; final polarization "
+            + ",".join(f"{value:.6g}" for value in final_p)
+            + " uC/cm^2 used as endpoint branch reference"
+        )
+
+    #==============================================================
+    # 5. 计算外加电场方向：笛卡尔坐标系下的方向
+    # field_direction 默认为00-1方向，field-coordinates默认为lattice，
+    # reference_lattice为image0的晶格矢量矩阵，
+    # 转换为笛卡尔坐标系下的方向向量
+    # field_direction得到笛卡尔坐标下的外加电场方向的单位矢量
+    #==============================================================
+    field_direction = resolve_direction(field_direction_arg, field_coordinates, reference_lattice)
+    print(f"field_direction: {field_direction}")
+
+    #==============================================================
+    # 6. 构建branch
+    #=============================================================
+    branch_images = build_branch_images(
+        initial_polarization=initial_p,
+        raw_images=raw_images,
+        projection_direction=field_direction,
+        center_image=center_image,
+        continuity_threshold_uC_cm2=continuity_threshold,
+        endpoint_reference=endpoint_reference,
+    )
+    # print(f"The last image of the branch is {branch_images[-1].branch_polarization_uC_cm2} uC/cm^2")
+
+    #=============================================================
+    # 7. 计算外场下的影响
+    #=============================================================
+    rel_energies = np.array([img.rel_energy_eV for img in raw_images])
+    #print(f"rel_energies: {rel_energies}")
+    saddle_image = int(np.argmax(rel_energies))
     first_branch_dipole = branch_images[0].branch_dipole_eA
+
+    # projected_delta为一个列表，表示每个分支图像的偶极矩在外加电场方向上的投影与第一个分支图像的偶极矩在外加电场方向上的投影的差值
     projected_delta = np.array(
-        [(image.branch_dipole_eA - first_branch_dipole) @ field_direction for image in branch_images],
+        [(branch_image.branch_dipole_eA - first_branch_dipole) @ field_direction for branch_image in branch_images],
         dtype=float,
     )
-    # Select which images/steps become constraints in the chosen barrier mode.
-    candidate_indices = candidate_indices_for_mode(barrier_mode, len(raw_images), saddle_image)
-    # Solve every linear constraint for its required field.
-    requirements, impossible = coercive_requirements(
-        rel_energies,
-        projected_delta,
-        candidate_indices,
-        coercive_criterion,
-    )
-    # Ec is the maximum finite requirement, unless any active constraint is impossible.
-    coercive_field, limiting_image = coercive_field_from_requirements(
-        requirements,
-        impossible,
-        coercive_criterion,
-        barrier_mode,
-        notes,
-    )
 
-    discontinuous = [img.image for img in branch_images if not img.component_continuity_ok]
+
+    #=============================================================
+    # 计算 \omega \vec{P} \cdot \vec{E} 能量项
+    #=============================================================
+    first_omega_P_E = omega_P_dot_E_energy(
+        raw_images[0].volume_A3,
+        branch_images[0].branch_polarization_uC_cm2,
+        E_field_direction=field_direction,
+        E_field_magnitude=1.0
+        )
+    delta_omega_P_E = np.array(
+        [omega_P_dot_E_energy(raw_images[image].volume_A3, branch_images[image].branch_polarization_uC_cm2, E_field_direction=field_direction, E_field_magnitude=1.0)-first_omega_P_E for image in range(len(branch_images))],
+        dtype=float,
+    )
+    print(f"delta_omega_P_E: {delta_omega_P_E}")
+    # print("====="*6)
+    # print(f"projected_delta: {projected_delta}")
+    # print("====="*6)
+
+    #=============================================================
+    # 计算外场矫正下的能量
+    # 所需参数：相对能，晶胞体积，branch 校正后的P，电场方向，电厂振幅
+    #=============================================================
+    # omega_P_E: list[np.ndarray | None] = [None] * len(raw_images)
+    # field_magnitude = 1.0  # MV/cm，施加单位电场时
+    # for image_index in range(len(branch_images)):
+    #     omega_i = raw_images[image_index].volume_A3
+    #     P_i = branch_images[image_index].branch_polarization_uC_cm2
+    #     E_field_direction = field_direction
+    #     E_field_magnitude = field_magnitude
+    #     omega_P_E[image_index] = omega_P_dot_E_energy(omega_i, P_i, E_field_direction, E_field_magnitude)
+    #     print(f"image_index: {image_index}, omega_P_E: {omega_P_E[image_index]} eV")
+
+
+    discontinuous = [branch_image.image for branch_image in branch_images if not branch_image.component_continuity_ok]
+    print(f"discontinuous: {discontinuous}")
     if discontinuous:
+        print("========================================")
         notes.append(
             "branch component jump exceeds threshold at images "
             + ",".join(str(image) for image in discontinuous)
+            + "; coercive field is not reliable until branch correction is fixed"
+        )
+        coercive_field = math.inf
+        limiting_image = None
+    else:
+        # barrier_mode为用户输入--barrier-mode，默认为full-path
+        #==============================================================
+        # 根据输入的--barrier-mode参数，默认值为full-path，返回不同的范围值；
+        # to-saddle: 1到saddle_image的范围
+        # intermediate: 1到image_count-1的范围，意味着不考虑首尾两个端点的能量
+        # full-path: 1到image_count的范围
+        # 得到的是一个列表
+        #==============================================================
+        candidate_indices = candidate_indices_for_mode(barrier_mode, len(raw_images), saddle_image)
+        # print("================================")
+        # print(f"candidate_indices: {list(candidate_indices)}")
+
+        #==============================================================
+        # 
+        #==============================================================
+        requirements, impossible = coercive_requirements(
+            rel_energies,
+            delta_omega_P_E,
+            candidate_indices,
+            coercive_criterion,
+        )
+        print("================================")
+        print(f"requirements: {requirements}")
+        print(f"impossible: {impossible}")
+        print("================================")
+
+        #=============================================================
+        # 根据requirements和impossible计算矫顽场和限制图像
+        # requirements为一个列表，包含了当前image所需要的矫顽场大小
+        # impossible为一个列表，包含了当前image无法满足矫顽场要求的图像索引
+        # 
+        #=============================================================
+        coercive_field, limiting_image = coercive_field_from_requirements(
+            requirements,
+            impossible,
+            coercive_criterion,
+            barrier_mode,
+            notes,
         )
 
     return PathResult(
@@ -678,13 +533,13 @@ def analyze_path(
         raw_images=raw_images,
         branch_images=branch_images,
         field_direction=field_direction,
-        branch_direction=branch_direction,
-        target_initial_polarization_uC_cm2=initial_polarization,
-        target_final_polarization_uC_cm2=final_polarization,
-        branch_mode=branch_mode,
+        branch_direction=field_direction,
+        target_initial_polarization_uC_cm2=initial_p,
+        target_final_polarization_uC_cm2=final_p,
+        branch_mode="center-zero",
         barrier_mode=barrier_mode,
         coercive_criterion=coercive_criterion,
-        continuity_threshold_uC_cm2=continuity_threshold_uC_cm2,
+        continuity_threshold_uC_cm2=continuity_threshold,
         saddle_image=saddle_image,
         saddle_energy_eV=float(rel_energies[saddle_image]),
         coercive_field_MV_cm=coercive_field,

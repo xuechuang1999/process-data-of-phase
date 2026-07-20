@@ -22,16 +22,16 @@ def parse_structure(path: Path) -> tuple[np.ndarray, float]:
         Omega: returned volume in Angstrom^3.
     """
 
-    lines = path.read_text(errors="ignore").splitlines() # 把结构文件的内容读取为文本，并按行分割为列表，errors="ignore"表示忽略编码错误
+    lines = path.read_text(errors="ignore").splitlines()
     if len(lines) < 8:
         raise ValueError(f"{path} is too short to be a VASP structure file")
-    scale = float(lines[1].split()[0]) # 读取第二行的缩放因子
+    scale = float(lines[1].split()[0])
     lattice = np.array(
         [[float(x) for x in lines[i].split()[:3]] for i in range(2, 5)],
         dtype=float,
-    ) # 读取第3到第5行的晶格向量，并转换为numpy数组，数组维度为3x3，数据类型为float
-    lattice *= scale # 将晶格向量乘以缩放因子得到实际的晶格向量
-    volume = abs(float(np.linalg.det(lattice))) # 计算晶格向量的行列式的绝对值，得到晶胞体积
+    )
+    lattice *= scale
+    volume = abs(float(np.linalg.det(lattice)))
     return lattice, volume
 
 
@@ -68,7 +68,7 @@ def parse_oszicar_energy(path: Path) -> float:
         later as U_i = E_i - E_0.
     """
 
-    text = path.read_text(errors="ignore") # Ignore encoding errors in case of non-ASCII characters in OSZICAR.
+    text = path.read_text(errors="ignore")
     matches = re.findall(r"E0=\s*([-+0-9.Ee]+)", text)
     if not matches:
         raise ValueError(f"could not find E0 in {path}")
@@ -107,15 +107,13 @@ def parse_lcalcpol_dipoles(outcar: Path) -> tuple[np.ndarray, np.ndarray]:
     根据传入的outcar路径，读取OUTCAR文件中的离子和电子偶极矩，并返回两个numpy数组，分别表示离子偶极矩和电子偶极矩，单位为e*Angstrom。
     """
 
-    # 将OUTCAR文件的内容读取为文本
     text = outcar.read_text(errors="ignore")
-    # 正则匹配读取离子偶极矩，为文本
     ion_matches = re.findall(
         r"Ionic dipole moment: p\[ion\]=\(\s*([-+0-9.Ee]+)\s+"
         r"([-+0-9.Ee]+)\s+([-+0-9.Ee]+)\s*\)",
         text,
     )
-    # 正则匹配读取电子偶极矩，为文本
+
     elc_matches = re.findall(
         r"Total electronic dipole moment: p\[elc\]=\(\s*([-+0-9.Ee]+)\s+"
         r"([-+0-9.Ee]+)\s+([-+0-9.Ee]+)\s*\)",
@@ -123,8 +121,8 @@ def parse_lcalcpol_dipoles(outcar: Path) -> tuple[np.ndarray, np.ndarray]:
     )
     if not ion_matches or not elc_matches:
         raise ValueError(f"could not find LCALCPOL dipoles in {outcar}")
-    ion = np.array([float(x) for x in ion_matches[-1]], dtype=float) # 读取最后一次匹配的离子偶极矩，并转换为numpy数组，数据类型为float
-    electronic = np.array([float(x) for x in elc_matches[-1]], dtype=float) # 读取最后一次匹配的电子偶极矩，并转换为numpy数组，数据类型为float
+    ion = np.array([float(x) for x in ion_matches[-1]], dtype=float)
+    electronic = np.array([float(x) for x in elc_matches[-1]], dtype=float)
     return ion, electronic
 
 
@@ -145,7 +143,6 @@ def polarization_quanta(lattice: np.ndarray, volume_A3: float) -> np.ndarray:
         Omega: volume_A3, cell volume in Angstrom^3.
         Q_a,Q_b,Q_c: returned polarization quantum vectors in uC/cm^2.
     """
-    # 计算极化量子的值，返回一个3x3的numpy数组，表示三个极化量子向量，单位为uC/cm^2
 
     return lattice * UC_CM2_PER_EANG_A3 / volume_A3
 
@@ -154,6 +151,7 @@ def discover_image_count(path: Path) -> int:
     """Count NEB image directories named 00, 01, ..."""
 
     image_dirs = sorted(p for p in path.iterdir() if p.is_dir() and re.fullmatch(r"\d\d", p.name))
+    # image_dirs = [f"{i:02d}" for i in range(2, 7)]
     if not image_dirs:
         raise ValueError(f"could not find image directories in {path}")
     return len(image_dirs)
@@ -174,10 +172,7 @@ def read_relative_energies(path: Path, source: str, image_count: int) -> tuple[n
         E_0: OSZICAR E0 value of image 00.
         U_i: returned relative zero-field energy, in eV.
     """
-    # 根据传递的path路径和source参数（用于指定能量来源）
 
-    # 创建一个空的列表，用于存储读取能量时的提示信息
-    # 先从 OSZICAR 文件中读取每个 image 的 E0 能量值，并计算相对能量
     notes: list[str] = []
     oszicar_energies = np.array(
         [parse_oszicar_energy(path / f"{i:02d}" / "OSZICAR") for i in range(image_count)],
@@ -185,11 +180,9 @@ def read_relative_energies(path: Path, source: str, image_count: int) -> tuple[n
     )
     oszicar_rel = oszicar_energies - oszicar_energies[0]
 
-    # 从 path下的neb.dat 文件中读取能量，如果存在的话，检测其长度是否与image_count一致，并与 OSZICAR 的相对能量进行比较，在notes中记录差异信息（能量差大于1e-3的情况下）；如果存在但是长度不一致，则在 notes 中记录提示信息
     neb_path = path / "neb.dat"
     neb_rel: np.ndarray | None = None
     if neb_path.exists():
-        # 存在neb.dat文件，
         neb_rel = parse_neb_dat(neb_path)
         if len(neb_rel) == image_count:
             max_diff = float(np.max(np.abs(neb_rel - oszicar_rel)))
@@ -199,7 +192,6 @@ def read_relative_energies(path: Path, source: str, image_count: int) -> tuple[n
             notes.append(f"neb.dat has {len(neb_rel)} points, expected {image_count}")
             neb_rel = None
 
-    # 根据source的值，决定返回哪个数据值
     if source == "neb":
         if neb_rel is None:
             raise ValueError(f"{path} has no usable neb.dat")
@@ -224,43 +216,35 @@ def read_raw_images(label: str, path: Path, energy_source: str) -> tuple[list[Ra
         Q_i: 3x3 matrix of polarization quantum vectors for image i.
     """
 
-    # 这里给出的是一个整数，表示路径中有多少个image目录
     image_count = discover_image_count(path)
-    # 读取相对能量，notes用于记录读取能量时的提示信息，得到的rel_energies是一个numpy数组，表示每个image的相对能量值，单位为eV
     rel_energies, notes, reference_energy = read_relative_energies(path, energy_source, image_count) 
-    # 创建一个空的列表，用于存储每个image的RawImage对象
+
     raw_images: list[RawImage] = [] 
     for image in range(image_count):
-        # 得到一个结构路径，默认指向的是CONTCAR文件，如果不存在则使用计算dipole中的POSCAR文件，依然没有则会使用image目录下的POSCAR文件，如果都不存在则会抛出异常
         structure_path = image_structure_path(path, image)
-        # 解析结构文件，得到晶格向量3x3的numpy数组，以及晶格体积
         lattice, volume = parse_structure(structure_path)
-        # 此时的ion_dipole和electronic_dipole都是维度为3*1的numpy数组，表示离子偶极矩和电子偶极矩，单位为e*Angstrom
         ion_dipole, electronic_dipole = parse_lcalcpol_dipoles(
             path / "1-dipol" / f"{image:02d}" / "OUTCAR"
         )
-        raw_dipole = ion_dipole + electronic_dipole # 计算总的原始偶极矩，单位为e*Angstrom
-        # Convert the LCALCPOL dipole density to polarization components.
-        # The Berry branch is still unresolved at this point; that is handled
-        # later by branch.py using the polarization quantum vectors.
-        raw_polarization = raw_dipole * UC_CM2_PER_EANG_A3 / volume # 将原始偶极矩转换为极化分量，单位为uC/cm^2
+        raw_dipole = ion_dipole + electronic_dipole
+        raw_polarization = raw_dipole * UC_CM2_PER_EANG_A3 / volume
         raw_images.append(
             RawImage(
                 label=label,
                 sample_path=path,
-                image=image,
+                image=image, # image为image的序号，从0开始计数
                 energy_path=path / f"{image:02d}" / "OSZICAR",
                 structure_path=structure_path,
                 dipole_outcar_path=path / "1-dipol" / f"{image:02d}" / "OUTCAR",
                 energy_eV=float(rel_energies[image] + reference_energy),
                 rel_energy_eV=float(rel_energies[image]),
-                lattice_A=lattice, # 晶格向量，单位为Angstrom
-                volume_A3=volume, # 晶格体积，单位为Angstrom^3
-                ion_dipole_eA=ion_dipole, # 离子偶极矩，单位为e*Angstrom
-                electronic_dipole_eA=electronic_dipole, # 电子偶极矩，单位为e*Angstrom
-                raw_dipole_eA=raw_dipole, # 原始偶极矩，单位为e*Angstrom
-                raw_polarization_uC_cm2=raw_polarization, # 原始极化，单位为uC/cm^2，即未经过平移的偶极矩
-                quantum_vectors_uC_cm2=polarization_quanta(lattice, volume), # 极化量子向量，单位为uC/cm^2
+                lattice_A=lattice,
+                volume_A3=volume,
+                ion_dipole_eA=ion_dipole,
+                electronic_dipole_eA=electronic_dipole,
+                raw_dipole_eA=raw_dipole,
+                raw_polarization_uC_cm2=raw_polarization,
+                quantum_vectors_uC_cm2=polarization_quanta(lattice, volume),
             )
         )
     return raw_images, notes

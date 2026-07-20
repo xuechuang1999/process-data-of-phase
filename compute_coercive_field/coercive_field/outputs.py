@@ -236,8 +236,8 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
     for result in results:
         first_branch = result.branch_images[0]
         last_branch = result.branch_images[-1]
-        # One compact row per sample: final Ec, limiting constraint, field
-        # direction, branch direction, and endpoint diagnostic values.
+                                                                          
+                                                                      
         summary_rows.append(
             {
                 "label": result.label,
@@ -274,39 +274,13 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
         initial_target_p = target_polarization(result, 0)
         for image_index, (raw, branch) in enumerate(zip(result.raw_images, result.branch_images)):
             target_p = target_polarization(result, image_index)
-            # delta_* is the quantity actually used in the external-field
-            # energy correction. It comes from the Berry-branch-corrected
-            # LCALCPOL vector polarization.
-            #
-            # Formulas:
-            #   Delta_P_i = P_branch_i - P_branch_0
-            #   Delta_mu_i = mu_branch_i - mu_branch_0
-            #
-            # CSV meaning:
-            #   delta_P_uC_cm2_* stores Delta_P_i.
-            #   delta_mu_eA_* stores Delta_mu_i.
+              
             delta_mu = branch_delta_mu_rows[image_index]
             delta_p = branch_delta_p_rows[image_index]
-
-            # target_delta_* is kept as a diagnostic of the simple prescribed
-            # switching path. It is no longer used for the field correction.
-            #
-            # Formulas:
-            #   Delta_P_target_i = P_target_i - P_target_0
-            #   Delta_mu_target_i = Delta_P_target_i * Omega_i / UC_CM2_PER_EANG_A3
+                                                                 
             target_delta_mu = target_delta_mu_rows[image_index]
             target_delta_p = target_p - initial_target_p
 
-            # Project vector changes onto the external field unit direction.
-            #
-            # Formulas:
-            #   Delta_mu_parallel_i = Delta_mu_i dot e_hat
-            #   Delta_P_parallel_i = Delta_P_i dot e_hat
-            #   dF_i/dE = -0.01 * Delta_mu_parallel_i
-            #
-            # Symbols:
-            #   e_hat = result.field_direction.
-            #   E is measured in MV/cm, so dF_i/dE has units eV/(MV/cm).
             delta_mu_parallel = float(delta_mu @ result.field_direction)
             delta_p_parallel = float(delta_p @ result.field_direction)
             slope = -EV_PER_EANG_MV_CM * delta_mu_parallel
@@ -320,15 +294,7 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
                 constraint_from = None
                 constraint_to = raw.image
             elif result.coercive_criterion == "downhill":
-                # Downhill criterion checks each adjacent step i-1 -> i.
-                # The required field is the field that makes this step flat.
-                #
-                # Formulas:
-                #   Delta_E_constraint = U_i - U_{i-1}
-                #   Delta_mu_constraint =
-                #       (Delta_mu_i - Delta_mu_{i-1}) dot e_hat
-                #   required_field =
-                #       Delta_E_constraint / (0.01 * Delta_mu_constraint)
+
                 prev_raw = result.raw_images[image_index - 1]
                 prev_delta_mu = branch_delta_mu_rows[image_index - 1]
                 prev_delta_p = branch_delta_p_rows[image_index - 1]
@@ -348,14 +314,7 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
                     requirement = math.inf
                 can_be_lowered = bool(constraint_delta_mu_parallel > 0)
             else:
-                # Barrier criterion checks image 00 -> i, i.e. the whole
-                # barrier height relative to the initial state.
-                #
-                # Formulas:
-                #   Delta_E_constraint = U_i - U_0
-                #   Delta_mu_constraint = Delta_mu_i dot e_hat
-                #   required_field =
-                #       Delta_E_constraint / (0.01 * Delta_mu_constraint)
+
                 constraint_de = float(raw.rel_energy_eV - result.raw_images[0].rel_energy_eV)
                 constraint_delta_mu_parallel = delta_mu_parallel
                 constraint_delta_p_parallel = delta_p_parallel
@@ -461,12 +420,7 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
             )
 
         for field in field_grid:
-            # barrier_eV stores the active path criterion value: either the
-            # full barrier B(E) or the largest uphill step D(E).
-            #
-            # Formulas:
-            #   barrier mode:  B(E) = max_i F_i(E) - F_0(E)
-            #   downhill mode: D(E) = max_i [F_i(E) - F_{i-1}(E)]
+
             barrier_rows.append(
                 {
                     "label": result.label,
@@ -480,11 +434,7 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
         if math.isfinite(result.coercive_field_MV_cm):
             profile_fields.append(result.coercive_field_MV_cm)
         for field in profile_fields:
-            # corrected_profiles.csv is intentionally small: it stores only
-            # zero field and Ec, which are the profiles most often inspected.
-            #
-            # Formula:
-            #   corrected_rel_energy_eV = F_i(E)
+
             corrected = corrected_relative_energies(result, field)
             for raw, value in zip(result.raw_images, corrected):
                 profile_rows.append(
@@ -551,7 +501,7 @@ def plot_barriers(df: pd.DataFrame, results: list[PathResult], output: Path) -> 
                 linewidths=1.2,
                 zorder=3,
             )
-            # ax.axvline(result.coercive_field_MV_cm, color=color, linewidth=1, zorder=0, alpha=0.5, linestyle="--")
+                                                                                                                    
 
     ax.axhline(0.0, color="0.65", linewidth=0.8)
     ax.set_ylim(bottom=0.0)

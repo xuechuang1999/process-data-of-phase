@@ -19,6 +19,7 @@ coercive_field/
   directions.py
   calculation.py
   outputs.py
+  final_polarization_direction.py
 ```
 
 各模块职责如下：
@@ -29,7 +30,7 @@ coercive_field/
 `branch.py` 只负责 Berry phase 分支修正，包括整数晶格矢量平移、逐 image
 连接和每个分量连续性检查。
 
-`directions.py` 只负责把 `{001}`、`{101}`、`{110}`、`{111}` 等方向转成单位矢量。
+`directions.py` 只负责把 `{001}`、`{101}`、`{110}`、`{111}` 等晶轴坐标系下的方向转成笛卡尔坐标下的单位矢量。
 
 `calculation.py` 只负责外电场投影、外场自由能修正、势垒和矫顽场计算。
 
@@ -179,23 +180,12 @@ k_2\mathbf{Q}_{b,i}+
 k_3\mathbf{Q}_{c,i}
 $$
 
-这个全局整数平移由中间 image 决定，使中间 image 的
-$|\mathbf{P}^{\mathrm{branch}}|$ 最小，也就是最靠近 0。它不要求中间 image
-严格等于 0，因为 polarization quantum 是离散的。
+这个全局整数平移由中间 image 决定，使中间 image 的 $|\mathbf{P}^{\mathrm{branch}}|$ 最小，也就是最靠近 0。它不要求中间 image 严格等于 0，因为 polarization quantum 是离散的。
 
-第三步，若路径存在非 180 度末态，程序只用末态方向解除右端 Berry 分支简并。
-这一步不是把所有 image 贴到一条线性 target path 上，而是先找出末态应该处于
-哪个等价 branch，再把同一个整数 branch offset 应用到中间 image 之后的右半段。
-默认 `--endpoint-direction auto` 会按相名设置：
-
-- `Pca2_1`：末态方向 $\{010\}$。
-- `Pmn2_1`：末态方向 $[-110]$，即 `-1,1,0`。
-
-如果不想使用这个端点方向辅助，可以显式设置：
-
-```bash
-python compute_coercive_field.py --endpoint-direction none
-```
+第三步，若 `--final-polarization auto` 根据路径旋转矩阵识别到末态不是 180 度反向，
+程序会用初态极化和旋转矩阵得到末态极化参考值，再只把中间 image 之后到末态的
+右半段整体平移到对应 Berry branch。这一步不是把所有 image 贴到线性 target
+path 上，而是只解除右端 branch 简并。
 
 这里要区分两个概念。
 
@@ -215,12 +205,12 @@ $$
 反向的外场，默认设置为：
 
 ```bash
---field-direction 0,0,-1 --field-coordinates lattice-diagonal
+--field-direction 0,0,-1 --field-coordinates lattice
 ```
 
-`--branch-direction` 目前主要用于 `branch_correction.csv` 里的
-`branch_projection_uC_cm2` 和 `monotonic_along_branch` 诊断列；默认
-`center-zero` 分支选择不靠它决定整数 branch。
+`branch_correction.csv` 里的 `branch_projection_uC_cm2` 和
+`monotonic_along_branch` 诊断列直接使用外电场方向投影。当前不再提供单独的
+branch 方向参数。
 
 ## Pca2_1 与 Pmn2_1 的方向
 
@@ -245,13 +235,13 @@ $\mu\mathrm{C/cm^2}$，Miller 指数只说明方向，不能直接替代极化�
 外场方向也要单独指定。例如沿 `Pca2_1` 初始铁电极化反向的场可写成：
 
 ```bash
-python compute_coercive_field.py --field-direction 0,0,-1 --field-coordinates lattice-diagonal
+python compute_coercive_field.py --field-direction 0,0,-1 --field-coordinates lattice
 ```
 
 沿 `Pmn2_1` 的 $\{101\}$ 反向场可写成：
 
 ```bash
-python compute_coercive_field.py --field-direction=-1,0,-1 --field-coordinates lattice-diagonal
+python compute_coercive_field.py --field-direction=-1,0,-1 --field-coordinates lattice
 ```
 
 若要研究非 180 度末态方向上的外场，例如 `Pca2_1` 的 $\{010\}$ 或
@@ -391,8 +381,20 @@ $$
 \left|\Delta P_{\alpha,i}^{\mathrm{prev}}\right|
 $$
 
-并与 `--continuity-threshold` 给出的阈值比较。默认阈值为
-$80\ \mu\mathrm{C/cm^2}$。如果某个 image 的任意分量跳变超过阈值，
+并与 `--continuity-threshold` 给出的阈值比较。默认 `auto` 阈值由
+当前路径的 polarization quantum 自动得到：
+
+$$
+P_{\mathrm{th}} =
+\frac{
+\max_i\max_{\mathbf{m}\in\{-1,0,1\}^3\setminus\{\mathbf{0}\}}
+\left|\mathbf{m}\cdot\mathbf{Q}_i\right|
+}{2N_{\mathrm{image}}}
+$$
+
+其中 $\mathbf{Q}_i=(\mathbf{Q}_{a,i},\mathbf{Q}_{b,i},\mathbf{Q}_{c,i})$。
+这样对 `101` 这类斜向翻转会考虑 $\mathbf{Q}_a+\mathbf{Q}_c$ 这样的组合极化量子。
+如果某个 image 的任意分量跳变超过阈值，
 `branch_correction.csv` 中 `component_continuity_ok` 会是 `False`，
 `coercive_field_summary.csv` 的 notes 也会记录对应 image。
 
@@ -582,7 +584,7 @@ $$
 
 Excel 的做法是先给出一个方向整数，例如 $(0,0,-1)$、$(-1,-1,0)$ 或
 $(-1,-1,-1)$，再用晶格长度归一化。脚本中这个模式叫
-`lattice-diagonal`。
+`lattice`。
 
 设输入方向为：
 
@@ -614,7 +616,7 @@ $$
 这对应脚本参数：
 
 ```bash
---field-coordinates lattice-diagonal
+--field-coordinates lattice
 ```
 
 如果想用完整晶格矢量做分数坐标到笛卡尔坐标的转换，则使用：
@@ -663,7 +665,7 @@ $$
 不是重新定义 NEB 路径或极化路径，而是改变 $\hat{\mathbf{e}}$，从而改变
 $\Delta\boldsymbol{\mu}_i\cdot\hat{\mathbf{e}}$。
 
-###  方向
+### 方向
 
 若电场沿负的 $\{001\}$ 方向：
 
@@ -681,12 +683,12 @@ $$
 运行命令为：
 
 ```bash
-python compute_coercive_field.py --field-direction 0,0,-1 --field-coordinates lattice-diagonal
+python compute_coercive_field.py --field-direction 0,0,-1 --field-coordinates lattice
 ```
 
 这通常用于 `Pca2_1` 相沿 $\{001\}$ 铁电极化轴的反向外场。
 
-###  方向
+### 方向
 
 `Pmn2_1` 相的铁电极化方向是 $\{101\}$。若电场沿负的 $\{101\}$ 方向：
 
@@ -704,10 +706,10 @@ $$
 运行命令为：
 
 ```bash
-python compute_coercive_field.py --field-direction=-1,0,-1 --field-coordinates lattice-diagonal --output-dir results_101
+python compute_coercive_field.py --field-direction=-1,0,-1 --field-coordinates lattice --output-dir results_101
 ```
 
-###  方向
+### 方向
 
 `Pca2_1` 的某些 NEB 路径末态可能转到 $\{010\}$ 方向。若要研究沿这个末态
 方向的外场，可以使用：
@@ -719,7 +721,7 @@ $$
 运行命令为：
 
 ```bash
-python compute_coercive_field.py --field-direction 0,1,0 --field-coordinates lattice-diagonal --output-dir results_010
+python compute_coercive_field.py --field-direction 0,1,0 --field-coordinates lattice --output-dir results_010
 ```
 
 ### [-110] 方向
@@ -735,7 +737,7 @@ $$
 运行命令为：
 
 ```bash
-python compute_coercive_field.py --field-direction=-1,1,0 --field-coordinates lattice-diagonal --output-dir results_m110
+python compute_coercive_field.py --field-direction=-1,1,0 --field-coordinates lattice --output-dir results_m110
 ```
 
 ### 负的 [110] 方向
@@ -756,20 +758,20 @@ $$
 运行命令为：
 
 ```bash
-python compute_coercive_field.py --field-direction -1,-1,0 --field-coordinates lattice-diagonal --output-dir results_110
+python compute_coercive_field.py --field-direction -1,-1,0 --field-coordinates lattice --output-dir results_110
 ```
 
 在 PowerShell 中，由于参数值以 `-` 开头，建议写成：
 
 ```bash
-python compute_coercive_field.py --field-direction=-1,-1,0 --field-coordinates lattice-diagonal --output-dir results_110
+python compute_coercive_field.py --field-direction=-1,-1,0 --field-coordinates lattice --output-dir results_110
 ```
 
 这里和 $[-110]$ 不是同一个方向；前者是 $(-1,-1,0)$，后者是 $(-1,1,0)$。
 如果某个 Excel 文件的 `Direction` 行写的是 `-1,-1,0`，就按这一行的三个整数
 直接传给 `--field-direction`。
 
-###  方向
+### 方向
 
 若电场沿负的 $\{111\}$ 方向：
 
@@ -787,13 +789,13 @@ $$
 运行命令为：
 
 ```bash
-python compute_coercive_field.py --field-direction -1,-1,-1 --field-coordinates lattice-diagonal --output-dir results_111
+python compute_coercive_field.py --field-direction -1,-1,-1 --field-coordinates lattice --output-dir results_111
 ```
 
 在 PowerShell 中建议写成：
 
 ```bash
-python compute_coercive_field.py --field-direction=-1,-1,-1 --field-coordinates lattice-diagonal --output-dir results_111
+python compute_coercive_field.py --field-direction=-1,-1,-1 --field-coordinates lattice --output-dir results_111
 ```
 
 如果要完全复现某个 Excel 文件，请优先查看该表中 `Direction` 行的三个整数，
@@ -862,7 +864,7 @@ python compute_coercive_field.py --field-direction=-1,-1,0 --output-dir results_
 python compute_coercive_field.py --field-direction=-1,-1,-1 --output-dir results_111
 python compute_coercive_field.py --barrier-mode to-saddle --output-dir results_to_saddle
 python compute_coercive_field.py --coercive-criterion barrier --barrier-mode intermediate --output-dir results_barrier
-python compute_coercive_field.py --branch-mode endpoint-target --initial-polarization 0,0,50 --final-polarization 0,0,-50 --output-dir results_endpoint_target
+python compute_coercive_field.py --initial-polarization 0,0,50 --final-polarization 0,0,-50 --output-dir results_manual_polarization
 ```
 
 批量脚本 `run_all_fe2_paths.sh` 会默认扫描 `001`、`010`、`101`、`m110`
@@ -892,40 +894,34 @@ python compute_coercive_field.py --sample HfO2=Pca2_1\xyz-000-011 --sample a-HZO
 
 ### 极化与 Berry Branch
 
-| 参数                        | 默认值               | 可选值或格式                                          | 含义                                                                                                                                                                               |
-| --------------------------- | -------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--initial-polarization`  | `0,0,50`           | `Px,Py,Pz`，单位 $\mu\mathrm{C/cm^2}$             | 线性`target_P_*` 诊断参考线的初态极化。默认外场修正不使用这个量。                                                                                                                |
-| `--final-polarization`    | `opposite-initial` | `opposite-initial` 或 `Px,Py,Pz`                  | 线性`target_P_*` 诊断参考线的末态极化。`opposite-initial` 表示取 `--initial-polarization` 的相反数。                                                                         |
-| `--endpoint-direction`    | `auto`             | `auto`、`none`、`dx,dy,dz`                      | 非 180 度末态方向，只用于选择等价 Berry branch 的末端分支，不强制中间 image 贴近 target path。`auto` 对 `Pca2_1` 使用 `{010}`，对 `Pmn2_1` 使用 `[-110]` 即 `-1,1,0`。 |
-| `--endpoint-polarization` | `none`             | `none` 或 `Px,Py,Pz`，单位 $\mu\mathrm{C/cm^2}$ | 显式给定末态 branch 极化矢量；若不是`none`，它优先于 `--endpoint-direction` 的方向和大小。                                                                                     |
-| `--branch-mode`           | `center-zero`      | `center-zero`、`endpoint-target`                  | Berry branch 选择模式。默认`center-zero` 先做三维连续展开，再让中间 image 最接近 0；`endpoint-target` 是保留的旧诊断模式。                                                     |
-| `--branch-direction`      | `0,0,-1`           | `field`、`reverse-initial`、`dx,dy,dz`          | `branch_projection_uC_cm2` 和 `monotonic_along_branch` 的诊断投影方向。默认 `center-zero` 的整数 branch 选择不由它决定。                                                     |
-| `--branch-coordinates`    | `lattice`          | `lattice-diagonal`、`lattice`、`cartesian`      | 解释`--branch-direction` 的坐标方式。默认按完整晶格基矢解释晶轴坐标。                                                                                                             |
-| `--branch-search-radius`  | `2`                | 整数                                                  | 兼容旧命令保留的参数；当前 branch 选择使用 quantum-basis 系数直接取整，不再按半径枚举候选分支。                                                                                      |
-| `--continuity-threshold`  | `80.0`             | 浮点数，单位$\mu\mathrm{C/cm^2}$                    | 判断相邻 image 三个极化分量是否连续的阈值；超过则在输出 notes 和`component_continuity_ok` 中标记。                                                                               |
+| 参数                       | 默认值   | 可选值或格式                                          | 含义                                                                                                                                                                                                                                |
+| -------------------------- | -------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--initial-polarization` | `auto` | `auto` 或 `Px,Py,Pz`，单位 $\mu\mathrm{C/cm^2}$ | `auto` 会先从路径识别相结构初态方向：`Pca2_1 -> 001`，`Pmn2_1 -> 101`，方向按晶轴坐标解释；再从 VASP LCALCPOL 的 image 00 等价 branch 中选择与该方向一致的初态极化。手动传入时仍作为线性`target_P_*` 诊断参考线的初态极化。 |
+| `--final-polarization`   | `auto` | `auto`、`opposite-initial` 或 `Px,Py,Pz`        | 线性`target_P_*` 诊断参考线的末态极化。`auto` 会根据路径旋转关系从初态极化推断；`opposite-initial` 表示取 `--initial-polarization` 的相反数。                                                                               |
+| `--continuity-threshold` | `auto` | `auto` 或浮点数，单位$\mu\mathrm{C/cm^2}$         | 判断相邻 image 三个极化分量是否连续的阈值；`auto` 使用 $\max|\mathbf{m}\cdot\mathbf{Q}|/(2N_{\mathrm{image}})$，超过则在输出 notes 和`component_continuity_ok` 中标记。                                                       |
 
 常见设置：
 
 ```bash
-python compute_coercive_field.py --endpoint-direction auto
-python compute_coercive_field.py --endpoint-direction none
-python compute_coercive_field.py --endpoint-polarization 0,60,0
+python compute_coercive_field.py --initial-polarization auto --final-polarization auto
+python compute_coercive_field.py --final-polarization opposite-initial
+python compute_coercive_field.py --final-polarization 0,60,0
 ```
 
 ### 外电场与矫顽场
 
-| 参数                     | 默认值               | 可选值或格式                                     | 含义                                                                                                                                |
-| ------------------------ | -------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `--field-direction`    | `0,0,-1`           | `reverse-initial` 或 `dx,dy,dz`              | 外电场方向$\hat{\mathbf{e}}$。外场修正使用分支修正后的 $\Delta\boldsymbol{\mu}_i\cdot\hat{\mathbf{e}}$。                        |
-| `--field-coordinates`  | `lattice`          | `lattice-diagonal`、`lattice`、`cartesian` | 解释`--field-direction` 的坐标方式。默认按完整晶格基矢解释晶轴坐标，例如 `-1,0,0` 表示沿 $-\mathbf{a}$。`lattice-diagonal` 仅保留为旧 Excel 兼容模式。 |
-| `--barrier-mode`       | `full-path`        | `to-saddle`、`intermediate`、`full-path`   | 参与势垒或下坡判据的 image 范围。`to-saddle` 只到零场 saddle；`intermediate` 排除两端；`full-path` 排除 image 00 但包含末态。 |
-| `--coercive-criterion` | `downhill`         | `downhill`、`barrier`                        | 矫顽场判据。`downhill` 要求每个相邻段都不再上坡；`barrier` 使用整体势垒降为 0 的判据。                                          |
+| 参数                     | 默认值        | 可选值或格式                                   | 含义                                                                                                                                |
+| ------------------------ | ------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--field-direction`    | `0,0,-1`    | `reverse-initial` 或 `dx,dy,dz`            | 外电场方向$\hat{\mathbf{e}}$。外场修正使用分支修正后的 $\Delta\boldsymbol{\mu}_i\cdot\hat{\mathbf{e}}$。                        |
+| `--field-coordinates`  | `lattice`   | `lattice`、`cartesian`                     | 解释`--field-direction` 的坐标方式。默认按完整晶格基矢解释晶轴坐标，例如 `-1,0,0` 表示沿 $-\mathbf{a}$。                      |
+| `--barrier-mode`       | `full-path` | `to-saddle`、`intermediate`、`full-path` | 参与势垒或下坡判据的 image 范围。`to-saddle` 只到零场 saddle；`intermediate` 排除两端；`full-path` 排除 image 00 但包含末态。 |
+| `--coercive-criterion` | `downhill`  | `downhill`、`barrier`                      | 矫顽场判据。`downhill` 要求每个相邻段都不再上坡；`barrier` 使用整体势垒降为 0 的判据。                                          |
 
 示例：
 
 ```bash
-python compute_coercive_field.py --field-direction 0,0,-1 --field-coordinates lattice-diagonal
-python compute_coercive_field.py --field-direction=-1,0,-1 --field-coordinates lattice-diagonal
+python compute_coercive_field.py --field-direction 0,0,-1 --field-coordinates lattice
+python compute_coercive_field.py --field-direction=-1,0,-1 --field-coordinates lattice
 python compute_coercive_field.py --coercive-criterion barrier --barrier-mode intermediate
 ```
 
@@ -954,7 +950,7 @@ python compute_coercive_field.py --field-step 0.05 --field-max 40 --output-dir r
 | `--code-dir DIR`      | 脚本所在目录                                | 包含`compute_coercive_field.py` 的代码目录。                                                    |
 | `--output-root DIR`   | `<phase-root>/coercive_field_all_results` | 批量输出根目录。                                                                                  |
 | `--python CMD`        | `python` 或环境变量 `$PYTHON_BIN`       | 调用 Python 的命令。                                                                              |
-| `--extra-args "ARGS"` | 空                                          | 额外传给`compute_coercive_field.py` 的参数，例如 `--extra-args "--endpoint-direction none"`。 |
+| `--extra-args "ARGS"` | 空                                          | 额外传给`compute_coercive_field.py` 的参数，例如 `--extra-args "--field-direction=-1,0,-1"`。 |
 | `--dry-run`           | 关闭                                        | 只打印将要运行的命令，不实际计算。                                                                |
 | `-h`、`--help`      | 无                                          | 显示帮助。                                                                                        |
 
@@ -972,19 +968,13 @@ python compute_coercive_field.py
 root = Pca2_1/xyz-000-011
 samples = undoped-HfO2, a-HZO, b-HZO, c-HZO
 energy_source = oszicar
-branch_mode = center-zero
-branch_direction = 0,0,-1   # 诊断投影方向，不决定默认 branch 整数选择
-branch_coordinates = lattice
 field_direction = 0,0,-1
 field_coordinates = lattice
 barrier_mode = full-path
 coercive_criterion = downhill
-initial_polarization = 0,0,50
-final_polarization = 0,0,-50
-endpoint_direction = auto   # Pca2_1 自动使用 {010} 末态方向解 Berry 分支简并
-endpoint_polarization = none
-continuity_threshold = 80
-branch_search_radius = 2
+initial_polarization = auto
+final_polarization = auto
+continuity_threshold = auto
 UC_CM2_PER_EANG_A3 = 1602.176634
 ```
 

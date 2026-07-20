@@ -266,12 +266,12 @@ $$
 
 ### 7.4 Berry branch 连续性选择
 
-默认 `--branch-mode center-zero`：
+当前固定使用 `center-zero` branch 矫正：
 
-1. 从 image 00 开始。
-2. 对后续 image 搜索整数分支 `n_i`，使当前 `P_branch_i` 与前一个 image 的 `P_branch_{i-1}` 连续。
-3. 对整条已经连续的路径加同一个整数平移，使几何中点 image 的极化最接近 0。
-4. 对非 180 度末态，如果可推断末态方向，则用末态参考只修正右半段分支歧义，不强迫整条路径线性。
+1. 先把几何中点 image 折到最接近零极化的 Berry branch。
+2. 从中点向左逐个 image 连续展开。
+3. 从中点向右逐个 image 连续展开。
+4. 对非 180 度末态，用 `--final-polarization auto` 从路径旋转矩阵得到末态极化参考，再只修正中点之后的右半段分支歧义，不强迫整条路径线性。
 
 连续分支选择不再穷举附近整数分支，而是在 polarization quantum 基底中
 直接计算需要平移的整数倍。对第 $i$ 个 image，以上一个已经修正好的
@@ -299,9 +299,9 @@ $$
 
 实现位置：
 
-- `branch.fold_continuous_from_previous()`
-- `branch.fold_to_target()`
-- `branch.refine_forward_branch_to_endpoint()`
+- `branch.continuous_center_zero_branch()`
+- `branch.direct_branch_to_reference()`
+- `branch.shift_right_half_to_endpoint()`
 - `branch.build_branch_images()`
 
 输出诊断：
@@ -335,11 +335,6 @@ $$
 $$
 
 $$
-\text{lattice-diagonal:}\quad
-\mathbf{r}=(d_1a_x,\ d_2b_y,\ d_3c_z)
-$$
-
-$$
 \hat{\mathbf{e}}=\frac{\mathbf{r}}{|\mathbf{r}|}
 $$
 
@@ -349,8 +344,7 @@ $$
 - `directions.resolve_direction()`
 
 默认 `--field-coordinates lattice`，即按完整晶格矢量解释
-`--field-direction`。`lattice-diagonal` 仅保留为旧 Excel 兼容模式，只按
-$a_x,b_y,c_z$ 三个对角长度近似归一化；非正交晶胞不应默认使用。
+`--field-direction`。不再支持只按晶格矩阵对角元近似缩放的坐标模式。
 
 ### 7.6 分支修正偶极矩变化
 
@@ -656,12 +650,9 @@ root/c-<root-name>
 
 | 目标                 | 修改位置                                                                            |
 | -------------------- | ----------------------------------------------------------------------------------- |
-| 改默认分支模式       | `cli.py` 的 `--branch-mode` 默认值。                                            |
-| 增加新的 branch mode | `branch.build_branch_images()` 加分支，并在 `cli.py` choices 加选项。           |
-| 改连续分支取整规则   | `branch.direct_branch_to_reference()` 和 `branch.fold_continuous_from_previous()`。 |
-| 改目标路径弱约束     | `branch.fold_continuous_near_target()`。                                          |
-| 改中点置零逻辑       | `branch.build_branch_images()` 中 `global_shift` 部分。                         |
-| 改非 180 度末态修正  | `branch.endpoint_reference()` 和 `branch.refine_forward_branch_to_endpoint()`。 |
+| 改中心置零和连续展开 | `branch.continuous_center_zero_branch()`。                                      |
+| 改单个 image 的取整规则 | `branch.direct_branch_to_reference()`。                                      |
+| 改非 180 度末态修正  | `branch.shift_right_half_to_endpoint()`。                                      |
 | 改连续性警告阈值     | CLI 参数`--continuity-threshold` 或 `build_branch_images()` 里的判断。          |
 
 改完后重点检查：
@@ -676,13 +667,12 @@ root/c-<root-name>
 修改：
 
 - `directions.resolve_direction()`
-- `cli.py` 的 `--field-coordinates` 或 `--branch-coordinates` choices。
+- `cli.py` 的 `--field-coordinates` choices。
 
 注意：
 
 - `field_direction` 会进入能量公式。
-- `branch_direction` 主要是诊断和少量 branch 参考逻辑。
-- 不要把二者混在一起，除非明确希望 branch 诊断方向等于外场方向。
+- branch 诊断投影方向固定使用 `field_direction`。
 
 ### 10.8 改外场能量修正公式
 

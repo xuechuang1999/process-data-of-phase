@@ -1,6 +1,7 @@
-import re
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import re
 
 
 def string2matrix(string):
@@ -17,9 +18,6 @@ def string2matrix(string):
 
 
 def extract_state_name(name):
-    """
-    从 xyz-000-011 或 a-xyz-000-011 中提取 xyz-000-011
-    """
     name = Path(name).name
     m = re.search(r"([xyz]{3}-[01]{3}-[01]{3})", name)
     if not m:
@@ -27,27 +25,12 @@ def extract_state_name(name):
     return m.group(1)
 
 
-def direction_to_label(v):
-    """
-    把 [0, 0, -1] 转成 [0 0 -1]
-    把 [1, 0, 1] 转成 [1 0 1]
-    """
-    v = np.asarray(v, dtype=int)
-    return "[" + " ".join(str(i) for i in v) + "]"
-
-
 def final_polarization_direction(folder_name, phase):
-    """
-    phase:
-        'pca21'  初始极化方向 001
-        'pmn21'  初始极化方向 101
-        'fe1'    初始极化方向 001, 也是  'pca21'
-        'fe2'    初始极化方向 101, 也是  'pmn21'
-    """
     state = extract_state_name(folder_name)
-    rot, trans = string2matrix(state)
+    rot, _ = string2matrix(state)
 
     phase = phase.lower()
+
     if phase in ["pca21", "pca2_1", "fe1"]:
         p0 = np.array([0, 0, 1], dtype=int)
     elif phase in ["pmn21", "pmn2_1", "fe2"]:
@@ -57,19 +40,4 @@ def final_polarization_direction(folder_name, phase):
 
     p_final = rot @ p0
 
-    return {
-        "folder": folder_name,
-        "state": state,
-        "rotation_matrix": rot,
-        "translation": trans,
-        "initial_direction": direction_to_label(p0),
-        "final_direction_vector": p_final,
-        "final_direction": direction_to_label(p_final),
-    }
-
-# # print(final_polarization_direction("xzy-001-000", "pca2_1"))
-# for key, value in final_polarization_direction("xzy-001-000", "pmn2_1").items():
-#     print(f"{key}: {value}")
-
-#     # if key != "folder":
-#     #     print(f"{key}: {value}")
+    return p_final, rot
