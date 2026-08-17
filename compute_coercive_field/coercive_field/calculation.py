@@ -11,7 +11,7 @@ from .branch import build_branch_images, continuous_center_zero_branch, direct_b
 from .constants import EV_PER_EANG_MV_CM, UC_CM2_PER_EANG_A3
 from .directions import resolve_direction, cartesian_to_lattice
 from .final_polarization_direction import final_polarization_direction
-from .models import PathResult, RawImage
+from .models import PathResult, RawImage, PathSegment
 from .vasp_io import parse_structure, read_raw_images
 
 
@@ -230,16 +230,16 @@ def coercive_requirements(
 
     if criterion == "barrier":
         for image in candidate_indices:
-            # 相对能量差值
-            # 偶极矩差值
             delta_energy = float(rel_energies[image] - rel_energies[0])
             delta_dipole = float(projected_delta[image] - projected_delta[0])
             if delta_energy <= 0:
                 continue
-            if delta_dipole >= delta_energy:
-                requirements.append((delta_energy / (delta_dipole), image))
+            if delta_dipole > 0.0:
+                requirements.append(
+                    (delta_energy / (EV_PER_EANG_MV_CM * delta_dipole), image)
+                )
             else:
-                continue
+                impossible.append(image)
         return requirements, impossible
 
     if criterion == "downhill":
@@ -248,13 +248,15 @@ def coercive_requirements(
             delta_dipole = float(projected_delta[image] - projected_delta[image - 1])
             if delta_energy <= 0:
                 continue
-            # if delta_dipole >= delta_energy:
-            #     requirements.append((delta_energy / (delta_dipole), image))
-            # else:
-            #     continue
-
-            requirements.append((delta_energy / (EV_PER_EANG_MV_CM * delta_dipole), image))
-            print(f"image: {image}, delta_energy: {delta_energy}, delta_dipole: {delta_dipole}, requirement: {delta_energy / (EV_PER_EANG_MV_CM * delta_dipole)}")
+            if delta_dipole > 0.0:
+                requirement = delta_energy / (EV_PER_EANG_MV_CM * delta_dipole)
+                requirements.append((requirement, image))
+                print(
+                    f"image: {image}, delta_energy: {delta_energy}, "
+                    f"delta_dipole: {delta_dipole}, requirement: {requirement}"
+                )
+            else:
+                impossible.append(image)
         return requirements, impossible
 
     raise ValueError(f"unknown coercive criterion: {criterion}")
@@ -313,6 +315,155 @@ def omega_P_dot_E_energy(omega_i: float, P_i: np.ndarray, E_field_direction: np.
     omega_P_dot_E = omega_i * np.dot(P_i, E_field_direction * E_field_magnitude) / UC_CM2_PER_EANG_A3
     return omega_P_dot_E
 
+
+# 计算images中的极大值和极小值点，并返回相应的索引值。
+def get_extrema_image_indices(raw_images: list[RawImage], tol_eV: float = 5e-3) -> tuple[int, int]:
+    rel_energies = np.array([img.rel_energy_eV for img in raw_images])
+
+    if rel_energies.ndim != 1:
+        raise ValueError("energies must be a one-dimensional array.")
+
+    if tol_eV < 0:
+        raise ValueError("tol_eV must be non-negative.")
+
+    if rel_energies.size < 3:
+        return np.array([], dtype=int), np.array([], dtype=int)
+
+    center = rel_energies[1:-1]
+    left = rel_energies[:-2]
+    right = rel_energies[2:]
+
+    minima_mask = (
+        (left - center > tol_eV)
+        & (right - center > tol_eV)
+    )
+
+    maxima_mask = (
+        (center - left > tol_eV)
+        & (center - right > tol_eV)
+    )
+
+    # +1 converts indices in rel_energies[1:-1] back to the full array.
+    minima_indices = np.flatnonzero(minima_mask) + 1
+    maxima_indices = np.flatnonzero(maxima_mask) + 1
+
+    return minima_indices, maxima_indices
+
+
+# 
+def build_path_segments(
+    energies_eV: np.ndarray,
+    internal_minima: np.ndarray,
+    tolerance_eV: float = 1e-8,
+) -> tuple[PathSegment, ...]:
+    """
+    Divide a NEB path using endpoints and internal local minima.
+
+    Each pair of adjacent states defines one segment. The highest-energy
+    image within the segment is used as the limiting image.
+
+    Parameters
+    ----------
+    energies_eV
+        Energy or electric enthalpy along the path.
+
+    internal_minima
+        Indices of significant internal local minima. Endpoints must not
+        be included here.
+
+    tolerance_eV
+        Numerical tolerance for zero barriers.
+
+    Returns
+    -------
+    tuple[PathSegment, ...]
+        Segment descriptions ordered from initial to final image.
+    """
+    energies = np.asarray(energies_eV, dtype=float)
+    minima = np.asarray(internal_minima, dtype=int)
+
+    if energies.ndim != 1:
+        raise ValueError("energies_eV must be one-dimensional.")
+
+    if energies.size < 2:
+        raise ValueError("At least two images are required.")
+
+    if not np.all(np.isfinite(energies)):
+        raise ValueError("energies_eV contains NaN or infinity.")
+
+    if np.any(minima <= 0) or np.any(minima >= energies.size - 1):
+        raise ValueError(
+            "internal_minima must contain only internal image indices."
+        )
+
+    minima = np.unique(minima)
+
+    # Initial endpoint + internal minima + final endpoint
+    state_indices = np.concatenate(
+        [
+            np.array([0], dtype=int),
+            minima,
+            np.array([energies.size - 1], dtype=int),
+        ]
+    )
+
+    segments: list[PathSegment] = []
+
+    for segment_index, (left, right) in enumerate(
+        zip(state_indices[:-1], state_indices[1:])
+    ):
+        interval = energies[left : right + 1]
+
+        maximum_index = left + int(np.argmax(interval))
+
+        start_energy = float(energies[left])
+        maximum_energy = float(energies[maximum_index])
+        end_energy = float(energies[right])
+
+        forward_obstacle = max(
+            0.0,
+            maximum_energy - start_energy,
+        )
+        reverse_obstacle = max(
+            0.0,
+            maximum_energy - end_energy,
+        )
+
+        if forward_obstacle <= tolerance_eV:
+            forward_obstacle = 0.0
+
+        if reverse_obstacle <= tolerance_eV:
+            reverse_obstacle = 0.0
+
+        maximum_is_internal = left < maximum_index < right
+
+        if maximum_is_internal:
+            segment_type = "internal_saddle"
+        elif maximum_index == left:
+            segment_type = "downhill_from_start"
+        elif maximum_index == right:
+            segment_type = "uphill_to_end"
+        else:
+            raise RuntimeError("Unexpected maximum-index classification.")
+
+        segments.append(
+            PathSegment(
+                segment_index=segment_index,
+                start_index=int(left),
+                maximum_index=int(maximum_index),
+                end_index=int(right),
+                start_energy_eV=start_energy,
+                maximum_energy_eV=maximum_energy,
+                end_energy_eV=end_energy,
+                forward_obstacle_eV=forward_obstacle,
+                reverse_obstacle_eV=reverse_obstacle,
+                energy_change_eV=end_energy - start_energy,
+                segment_type=segment_type,
+                maximum_is_internal=maximum_is_internal,
+            )
+        )
+
+    return tuple(segments)
 
 def analyze_path(
     label: str,
@@ -426,6 +577,15 @@ def analyze_path(
         endpoint_reference=endpoint_reference,
     )
     # print(f"The last image of the branch is {branch_images[-1].branch_polarization_uC_cm2} uC/cm^2")
+
+    # xxx 写一个函数实现读取校正后的branch的极小值和极大值对应的image的索引。
+    minima, maxima = get_extrema_image_indices(raw_images)
+    print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+    print(f"minima: {minima}, maxima: {maxima}")
+    print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+
+
+
 
     #=============================================================
     # 7. 计算外场下的影响

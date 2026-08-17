@@ -60,3 +60,23 @@ class PathResult:
     endpoint_rel_energy_eV: float
     endpoint_projected_dipole_eA: float
     notes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PathSegment:
+    segment_index: int
+
+    start_index: int
+    maximum_index: int
+    end_index: int
+
+    start_energy_eV: float
+    maximum_energy_eV: float
+    end_energy_eV: float
+
+    forward_obstacle_eV: float
+    reverse_obstacle_eV: float
+    energy_change_eV: float
+
+    segment_type: str
+    maximum_is_internal: bool

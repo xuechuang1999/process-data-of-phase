@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from uuid import uuid4
 
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
@@ -56,6 +57,38 @@ PLOT_STYLE = {
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
 }
+
+
+def save_figure(fig: plt.Figure, output: Path, **kwargs: object) -> None:
+    """Save a figure safely when ``output`` may be a cloud-sync placeholder.
+
+    Some Windows synchronization clients expose existing files as reparse
+    points. Pillow cannot open such placeholders with ``w+b``. Rendering to a
+    new sibling file first and then replacing the destination avoids that
+    failure and also keeps the old figure intact if rendering itself fails.
+    """
+
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    suffix = output.suffix or ".png"
+    temporary = output.with_name(
+        f".{output.stem}.{uuid4().hex}.tmp{suffix}"
+    )
+    try:
+        fig.savefig(
+            str(temporary),
+            format=suffix.removeprefix("."),
+            **kwargs,
+        )
+        try:
+            temporary.replace(output)
+        except OSError:
+            # Replacing an existing cloud placeholder may itself return
+            # EINVAL on Windows; unlink only after the new image exists.
+            output.unlink(missing_ok=True)
+            temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 SERIES_COLORS = ["#9a9c9e", "#ff0d0d", "#1f77b4", "#ff8000"]
@@ -213,6 +246,41 @@ def matrix_columns(prefix: str, mat: np.ndarray) -> dict[str, float]:
         for j, axis in enumerate(["x", "y", "z"]):
             rows[f"{prefix}_{row_name}_{axis}"] = float(mat[i, j])
     return rows
+
+
+def field_profile_dataframe(results: list[PathResult]) -> pd.DataFrame:
+    """Return the raw NEB points used to draw ``field_profiles.png``.
+
+    One row represents one sample, one selected electric field, and one NEB
+    image.  PCHIP points used only for visual smoothing are intentionally not
+    included, so the CSV contains calculated rather than interpolated data.
+    """
+
+    columns = [
+        "sample_index",
+        "label",
+        "path",
+        "field_MV_cm",
+        "image",
+        "corrected_rel_energy_eV",
+    ]
+    rows: list[dict[str, int | float | str]] = []
+    for sample_index, result in enumerate(results):
+        images = [raw.image for raw in result.raw_images]
+        for field in field_profile_fields(result.coercive_field_MV_cm):
+            corrected = corrected_relative_energies(result, float(field))
+            for image, energy in zip(images, corrected):
+                rows.append(
+                    {
+                        "sample_index": sample_index,
+                        "label": result.label,
+                        "path": str(result.path),
+                        "field_MV_cm": float(field),
+                        "image": int(image),
+                        "corrected_rel_energy_eV": float(energy),
+                    }
+                )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def write_outputs(results: list[PathResult], output_dir: Path, field_step: float, field_max: float | None) -> None:
@@ -446,6 +514,8 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
                     }
                 )
 
+    field_profile_data = field_profile_dataframe(results)
+
     pd.DataFrame(summary_rows).to_csv(output_dir / "coercive_field_summary.csv", index=False)
     pd.DataFrame(raw_rows).to_csv(output_dir / "raw_vasp_data.csv", index=False)
     pd.DataFrame(branch_rows).to_csv(output_dir / "branch_correction.csv", index=False)
@@ -454,10 +524,15 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
     pd.DataFrame(barrier_rows).to_csv(output_dir / "barrier_vs_field.csv", index=False)
     pd.DataFrame(profile_rows).to_csv(output_dir / "corrected_profiles.csv", index=False)
     pd.DataFrame(polarization_rows).to_csv(output_dir / "polarization_profiles.csv", index=False)
+    field_profile_data.to_csv(output_dir / "field_profiles.csv", index=False)
 
     plot_barriers(pd.DataFrame(barrier_rows), results, output_dir / "barrier_vs_field.png")
     plot_profiles(results, output_dir / "energy_profiles.png")
-    plot_field_profile_families(results, output_dir / "field_profiles.png")
+    plot_field_profile_families(
+        results,
+        output_dir / "field_profiles.png",
+        profile_data=field_profile_data,
+    )
     plot_polarization_profiles(results, output_dir / "polarization_profiles.png")
     plot_branch_polarization_profiles(results, output_dir / "branch_polarization_profiles.png")
 
@@ -511,7 +586,7 @@ def plot_barriers(df: pd.DataFrame, results: list[PathResult], output: Path) -> 
     style_axis(ax, "Electric field (MV/cm)", ylabel)
     ax.legend(loc="upper right", **LEGEND_KWARGS)
     fig.tight_layout(pad=0.2)
-    fig.savefig(output, transparent=False)
+    save_figure(fig, output, transparent=False)
     plt.close(fig)
 
 
@@ -556,23 +631,32 @@ def plot_profiles(results: list[PathResult], output: Path) -> None:
     for ax in axes_flat[len(results) :]:
         ax.axis("off")
     fig.tight_layout(pad=0.2)
-    fig.savefig(output, transparent=False)
+    save_figure(fig, output, transparent=False)
     plt.close(fig)
 
 
-def plot_field_profile_families(results: list[PathResult], output: Path) -> None:
+def plot_field_profile_families(
+    results: list[PathResult],
+    output: Path,
+    profile_data: pd.DataFrame | None = None,
+) -> None:
     """Plot families of corrected NEB profiles for multiple fields."""
+
+    if profile_data is None:
+        profile_data = field_profile_dataframe(results)
 
     apply_plot_style()
     fig, axes = plt.subplots(2, 2, figsize=GRID_FIGURE_SIZE, sharex=True)
     axes_flat = axes.ravel()
     for panel_index, (ax, result) in enumerate(zip(axes_flat, results)):
-        images = np.array([img.image for img in result.raw_images], dtype=float)
-        fields = field_profile_fields(result.coercive_field_MV_cm)
+        sample_data = profile_data[profile_data["sample_index"] == panel_index]
+        fields = sample_data["field_MV_cm"].drop_duplicates().to_numpy(dtype=float)
         colors = color_ramp(SERIES_COLORS[panel_index % len(SERIES_COLORS)], len(fields))
         marker = SERIES_MARKERS[panel_index % len(SERIES_MARKERS)]
         for idx, (field, color) in enumerate(zip(fields, colors)):
-            corrected = corrected_relative_energies(result, float(field))
+            curve = sample_data[np.isclose(sample_data["field_MV_cm"], field)].sort_values("image")
+            images = curve["image"].to_numpy(dtype=float)
+            corrected = curve["corrected_rel_energy_eV"].to_numpy(dtype=float)
             label = "E=0" if field == 0 else f"{field:.2f} MV/cm"
             plot_curve(
                 ax,
@@ -595,7 +679,7 @@ def plot_field_profile_families(results: list[PathResult], output: Path) -> None
     for ax in axes_flat[len(results) :]:
         ax.axis("off")
     fig.tight_layout(pad=0.2)
-    fig.savefig(output, transparent=False)
+    save_figure(fig, output, transparent=False)
     plt.close(fig)
 
 
@@ -631,7 +715,7 @@ def plot_polarization_profiles(results: list[PathResult], output: Path) -> None:
     for ax in axes_flat[len(results) :]:
         ax.axis("off")
     fig.tight_layout(pad=0.2)
-    fig.savefig(output, transparent=False)
+    save_figure(fig, output, transparent=False)
     plt.close(fig)
 
 
@@ -664,5 +748,5 @@ def plot_branch_polarization_profiles(results: list[PathResult], output: Path) -
     for ax in axes_flat[len(results) :]:
         ax.axis("off")
     fig.tight_layout(pad=0.2)
-    fig.savefig(output, transparent=False)
+    save_figure(fig, output, transparent=False)
     plt.close(fig)
