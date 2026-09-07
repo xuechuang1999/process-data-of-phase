@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(description="Compute coercive fields from VASP NEB and LCALCPOL outputs.")
 
-    parser.add_argument("--root", type=Path, default=Path("Pmn2_1") / "xyz-101-000")
+    parser.add_argument("--root", type=Path, default=Path("Pca2_1") / "xyz-000-011")
 
     parser.add_argument("--sample", action="append", default=[], help="Optional sample in LABEL=PATH form.")
 

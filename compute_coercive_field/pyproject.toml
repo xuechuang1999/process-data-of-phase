@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 compute-coercive-field = "coercive_field.cli:main"
+ferroelectric-flip = "coercive_field.ferroelectric_flip:main"
 
 [tool.setuptools]
 packages = ["coercive_field"]

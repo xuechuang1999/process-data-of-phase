@@ -3,12 +3,182 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
 from .constants import UC_CM2_PER_EANG_A3
 from .models import RawImage
+
+
+@dataclass
+class Poscar:
+    """POSCAR data normalized to an Angstrom lattice and Direct coordinates."""
+
+    comment: str
+    lattice: np.ndarray
+    symbols: list[str] | None
+    counts: list[int]
+    frac: np.ndarray
+    selective: bool
+    extras: list[list[str]]
+
+    @property
+    def natoms(self) -> int:
+        return sum(self.counts)
+
+
+def _is_int_list(words: Sequence[str]) -> bool:
+    if not words:
+        return False
+    try:
+        [int(word) for word in words]
+    except ValueError:
+        return False
+    return True
+
+
+def _effective_scale(raw_lattice: np.ndarray, scale: float) -> float:
+    """Return VASP's effective scalar lattice multiplier."""
+
+    if scale == 0.0:
+        raise ValueError("POSCAR scale factor cannot be zero")
+    if scale > 0.0:
+        return scale
+
+    # A negative scale specifies the desired cell volume in Angstrom^3.
+    raw_volume = abs(float(np.linalg.det(raw_lattice)))
+    if raw_volume < 1.0e-14:
+        raise ValueError("POSCAR lattice is singular")
+    return (-scale / raw_volume) ** (1.0 / 3.0)
+
+
+def _parse_scaled_lattice(lines: list[str], path: Path) -> tuple[np.ndarray, float]:
+    """Return the scaled lattice and effective scalar from POSCAR text."""
+
+    scale_words = lines[1].split()
+    if len(scale_words) != 1:
+        raise ValueError(
+            f"{path}: only the usual one-number POSCAR scale factor is supported, "
+            "not three-component scaling"
+        )
+    scale = float(scale_words[0])
+    raw_lattice = np.array(
+        [[float(value) for value in lines[index].split()[:3]] for index in range(2, 5)],
+        dtype=float,
+    )
+    factor = _effective_scale(raw_lattice, scale)
+    return raw_lattice * factor, factor
+
+
+def read_poscar(path: Path) -> Poscar:
+    """Read a VASP 4/5/6 POSCAR or CONTCAR.
+
+    The returned lattice is expressed in Angstrom and the positions are
+    normalized to wrapped Direct coordinates. Selective-dynamics flags and
+    any trailing per-atom fields are retained in ``extras``.
+    """
+
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if len(lines) < 8:
+        raise ValueError(f"{path}: file is too short to be a POSCAR")
+
+    comment = lines[0].rstrip()
+    lattice, factor = _parse_scaled_lattice(lines, path)
+
+    cursor = 5
+    words = lines[cursor].split()
+    if _is_int_list(words):
+        symbols = None
+        counts = [int(value) for value in words]
+        cursor += 1
+    else:
+        symbols = words
+        cursor += 1
+        counts = [int(value) for value in lines[cursor].split()]
+        cursor += 1
+        if len(symbols) != len(counts):
+            raise ValueError(f"{path}: numbers of symbols and counts differ")
+
+    selective = False
+    if lines[cursor].strip().lower().startswith("s"):
+        selective = True
+        cursor += 1
+
+    coordinate_mode = lines[cursor].strip().lower()
+    cursor += 1
+    if not coordinate_mode:
+        raise ValueError(f"{path}: missing coordinate mode")
+    direct = coordinate_mode.startswith("d")
+    cartesian = coordinate_mode.startswith(("c", "k"))
+    if not (direct or cartesian):
+        raise ValueError(f"{path}: unknown coordinate mode {coordinate_mode!r}")
+
+    natoms = sum(counts)
+    if len(lines) < cursor + natoms:
+        raise ValueError(f"{path}: expected {natoms} coordinate lines")
+
+    coordinates: list[list[float]] = []
+    extras: list[list[str]] = []
+    for index in range(natoms):
+        fields = lines[cursor + index].split()
+        if len(fields) < 3:
+            raise ValueError(f"{path}: malformed coordinate line {cursor + index + 1}")
+        coordinates.append([float(value) for value in fields[:3]])
+        extras.append(fields[3:])
+
+    xyz = np.asarray(coordinates, dtype=float)
+    if direct:
+        frac = xyz
+    else:
+        # Cartesian coordinates are also multiplied by a positive POSCAR scale.
+        cart = xyz * factor
+        frac = cart @ np.linalg.inv(lattice)
+
+    return Poscar(
+        comment=comment,
+        lattice=lattice,
+        symbols=symbols,
+        counts=counts,
+        frac=frac % 1.0,
+        selective=selective,
+        extras=extras,
+    )
+
+
+def write_poscar(path: Path, structure: Poscar, frac: np.ndarray, comment: str) -> None:
+    """Write Direct coordinates using the metadata and atom order of ``structure``."""
+
+    positions = np.asarray(frac, dtype=float)
+    if positions.shape != (structure.natoms, 3):
+        raise ValueError(
+            f"fractional coordinates have shape {positions.shape}, "
+            f"expected ({structure.natoms}, 3)"
+        )
+
+    output: list[str] = [comment, "1.0"]
+    for vector in structure.lattice:
+        output.append("  " + "  ".join(f"{value:20.14f}" for value in vector))
+
+    if structure.symbols is not None:
+        output.append("  " + "  ".join(structure.symbols))
+    output.append("  " + "  ".join(str(count) for count in structure.counts))
+
+    if structure.selective:
+        output.append("Selective dynamics")
+    output.append("Direct")
+
+    wrapped = np.mod(positions, 1.0)
+    wrapped[np.isclose(wrapped, 1.0, atol=1.0e-12)] = 0.0
+    for position, extra in zip(wrapped, structure.extras):
+        line = "  " + "  ".join(f"{value:20.14f}" for value in position)
+        if extra:
+            line += "  " + "  ".join(extra)
+        output.append(line)
+
+    path.write_text("\n".join(output) + "\n", encoding="utf-8")
 
 
 def parse_structure(path: Path) -> tuple[np.ndarray, float]:
@@ -22,15 +192,10 @@ def parse_structure(path: Path) -> tuple[np.ndarray, float]:
         Omega: returned volume in Angstrom^3.
     """
 
-    lines = path.read_text(errors="ignore").splitlines()
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     if len(lines) < 8:
         raise ValueError(f"{path} is too short to be a VASP structure file")
-    scale = float(lines[1].split()[0])
-    lattice = np.array(
-        [[float(x) for x in lines[i].split()[:3]] for i in range(2, 5)],
-        dtype=float,
-    )
-    lattice *= scale
+    lattice, _ = _parse_scaled_lattice(lines, path)
     volume = abs(float(np.linalg.det(lattice)))
     return lattice, volume
 
