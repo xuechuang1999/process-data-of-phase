@@ -533,6 +533,11 @@ def write_outputs(results: list[PathResult], output_dir: Path, field_step: float
         output_dir / "field_profiles.png",
         profile_data=field_profile_data,
     )
+    plot_field_profile_families(
+        results,
+        output_dir / "field_profiles.svg",
+        profile_data=field_profile_data,
+    )
     plot_polarization_profiles(results, output_dir / "polarization_profiles.png")
     plot_branch_polarization_profiles(results, output_dir / "branch_polarization_profiles.png")
 
@@ -671,7 +676,7 @@ def plot_field_profile_families(
             )
         ax.axhline(0.0, color="0.75", linewidth=0.8, zorder=0)
         ax.set_title(display_label(result.label), fontsize=12)
-        ylabel = "Energy barrier (eV)" if panel_index % 2 == 0 else None
+        ylabel = "Electric Enthalpy (eV)" if panel_index % 2 == 0 else None
         style_axis(ax, ylabel=ylabel)
         ax.legend(loc="lower left", **LEGEND_KWARGS)
     for ax in axes_flat[-2:]:
