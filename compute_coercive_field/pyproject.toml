@@ -1,0 +1,18 @@
+[project]
+name = "compute-coercive-field"
+version = "0.1.0"
+description = "Compute field-corrected NEB barriers and coercive fields from VASP outputs."
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib",
+  "numpy",
+  "pandas",
+  "scipy",
+]
+
+[project.scripts]
+compute-coercive-field = "coercive_field.cli:main"
+ferroelectric-flip = "coercive_field.ferroelectric_flip:main"
+
+[tool.setuptools]
+packages = ["coercive_field"]

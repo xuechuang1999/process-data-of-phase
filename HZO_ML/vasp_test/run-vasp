@@ -1,0 +1,21 @@
+#!/bin/bash
+#SBATCH -J HfO2
+#SBATCH -p v6_384
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=96
+##SBATCH -t 36:00:00
+#SBATCH -o out
+#SBATCH -e vasp.err
+
+module purge
+module load mpi/oneAPI/2022.1
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/public1/home/sch2118/software/hdf5-1.12.1/lib
+
+timer_start=`date "+%Y-%m-%d %H:%M:%S"`
+mpirun /public1/home/sch2200/software/vasp.6.4.0-oneapi-vtst-constr/bin/vasp_std
+timer_end=`date "+%Y-%m-%d %H:%M:%S"`
+duration=`echo $(($(date +%s -d "${timer_end}") - $(date +%s -d "${timer_start}"))) | awk '{t=split("60 s 60 m 24 h 999 d",a);for(n=1;n<t;n+=2){if($1==0)break;s=$1%a[n]a[n+1]s;$1=int($1/a[n])}print s}'`
+echo "开始： $timer_start"
+echo "结束： $timer_end"
+echo "耗时： $duration"
